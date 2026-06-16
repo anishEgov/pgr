@@ -1,0 +1,46 @@
+### Maven ###
+target/
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.properties
+
+### Compiled / build output ###
+*.class
+build/
+dist/
+out/
+
+### STS / Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+### VS Code ###
+.vscode/
+
+### Logs ###
+*.log
+logs/
+
+### OS files ###
+.DS_Store
+Thumbs.db
+
+### Environment / secrets ###
+*.env
+.env
