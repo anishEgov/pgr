@@ -91,34 +91,40 @@ in its own phase. The Spring Boot 3.x services are internalized first.
 
 ## 4. Key decisions
 
+> **NOTE (revised after discussion).** Earlier drafts proposed root package `org.egov.platform`
+> with a full `api/`+`internal/` split per module. That was rejected as too much movement. The
+> decisions below are the **final, minimal-change** agreement. Superseded rows are marked.
+
 | # | Decision | Rationale (first principles) |
 |---|---|---|
-| D0 | **Keep the 7 original service folders untouched as a reference. Build the modulith in a new sibling folder `pgr-modulith/`** (seeded by copying `pgr-services`). | We want to *compare* the two architectures side-by-side, not lose the microservice version. Non-destructive: the reference keeps compiling/running independently; every modulith change is isolated to `pgr-modulith/`. The "host app = pgr-services" decision is unchanged — `pgr-modulith` simply *is* that host, grown to absorb the other modules. |
-| D1 | **App root package = `org.egov.platform`**, single `@SpringBootApplication @Modulithic` main class (`PlatformApplication`) lives there. Each former service becomes ONE module package: `org.egov.platform.{pgr,idgen,mdms,localization,workflow,persister,user}`. | Modulith modules are the direct sub-packages of the root. Rooting at `org.egov.platform` (not `org.egov`) keeps the module scan off the library jars that live under `org.egov.*` (`org.egov.common`, `org.egov.tracer`, `mdms-client`). `pgr` is "main" *functionally*, but the package root is the neutral `platform`. |
-| D1a | **Inside each module: `api/` (public — interfaces, DTOs, published events) and `internal/` (impl, repos, entities — package-private).** Cross-module access goes only through `api/`. | This is what makes the boundary *real*: Modulith treats non-`api`/non-named-interface types as internal and fails the build if another module imports them. Encapsulation is enforced by the compiler+verify(), not convention. |
-| D2 | **Repackage** every service under its module package, preserving logic/entities (`org.egov.id`→`org.egov.platform.idgen.*`, mdms `org.egov.infra`→`org.egov.platform.mdms.*`, persister `org.egov.infra`→`org.egov.platform.persister.*`, localization `org.egov.{config,web,...}`→`org.egov.platform.localization.*`, `org.egov.pgr`→`org.egov.platform.pgr.*`, `org.egov.wf`→`org.egov.platform.workflow.*`). | Removes the `org.egov.infra` clash between mdms & persister and gives each module a single clean boundary Modulith can verify. |
-| D3 | **Single `pom.xml`** = union of all modules' dependencies, pinned to **Spring Boot 3.2.2 / Java 17** (PGR's version). 3.4.5 services are aligned to 3.2.2. | One deployable ⇒ one classpath. Version skew is impossible inside one JVM; we must converge on one Spring Boot line. 3.4.5→3.2.2 is a minor step (low risk) vs. 1.5→3.2 for user (high risk, hence D6). |
-| D4 | **One shared datasource**, one Postgres. Each module keeps its **own Flyway migration folder** (`db/migration/<module>`). | A single process should have a single transaction boundary; multiple `DataSource` beans re-import the distributed-data problem we are trying to delete. Per-module migration folders preserve schema ownership/clarity. |
-| D5 | **Sync** cross-module calls (PGR → idgen/workflow/mdms/localization) are rewritten from `RestTemplate` to **injection of the target module's `api/` interface bean** (in-process). **Async** flows (persister write path, notifications) use **Spring Modulith application events** (`@ApplicationModuleListener`). The modules' existing **HTTP controllers stay** so external callers (Postman) keep working. | The whole point of the modulith: replace network hops with in-process calls/events while keeping the external API intact. Sync→interface keeps the call-site obvious and transactional; async→event removes temporal coupling without a broker per-hop. |
-| D6 | **`egov-user` and the not-in-repo deps (HRMS, boundary, url-shortener)** keep using `RestTemplate` against **port-forwarded** hosts. | user = Spring Boot 1.5/Java 8 version-skew risk (B), migrated last; others = no source available. Both are genuine "remote" dependencies for now. |
-| D7 | **Single `application.yml`** at `src/main/resources`; per-module settings namespaced `platform.<module>.*`; shared infra (datasource, kafka, event-publication-registry) declared once. Profiles via `application-<profile>.yml`. | One process ⇒ one config source of truth. Prefix-namespacing keeps module settings from colliding while staying in one file. |
-| D8 | **`git init` + commit after every edit**, linear history on the default branch. | The user wants the commit log itself to be the change-tracking artifact (paired with this doc). A linear history on one branch makes each transformation step trivially `diff`-able against the microservice reference. |
+| D0 | **Keep the original service folders untouched as a microservice reference. Build the modulith in a new sibling folder `application/`.** | Non-destructive, lets us A/B the two architectures. The single Spring Modulith app lives entirely under `application/`; the 6 source folders remain the reference. |
+| D1 | **App root package = `org.egov`**, single `@SpringBootApplication @Modulithic` class `org.egov.Application`. Each former service is ONE module = ONE distinct sub-package. **`scanBasePackages` lists the module packages explicitly** so the `org.egov.common`/`org.egov.tracer`/`org.egov.mdms` *library* packages on the classpath are not component-scanned. | Minimal movement: `pgr`,`id`,`wf` already sit on distinct sub-packages of `org.egov`, so they don't move. Rooting at `org.egov` (not a new `org.egov.platform`) avoids repackaging the 3 clean services. The explicit scan list is the price for keeping the bare `org.egov` root clean. |
+| D1a | *(SUPERSEDED — no forced `api/`+`internal/` split.)* Each module stays in its **existing internal sub-structure** (e.g. `pgr.service`, `pgr.web`). Cross-module access discipline is documented and (later) checked via Modulith named-interfaces, not a mass file move now. | "Minimal changes": splitting 250+ files into api/internal is not a *required* change to get a working modulith. Encapsulation can be tightened incrementally once the single app boots. |
+| D2 | **Module package map** (only what *must* move moves): `pgr`→`org.egov.pgr` *(unchanged)*; `idgen`→`org.egov.id` *(unchanged)*; `workflow`→`org.egov.wf` *(unchanged)*; `mdms-v2` `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; `persister` `org.egov.infra.persist.*`→`org.egov.persist.*`; `localization` `org.egov.{config,web,util,domain,persistence}`→`org.egov.localization.*`. | `mdms` can't be named `org.egov.mdms` (the `mdms-client` jar already owns that package). `infra.*` and localization's bare generic packages aren't valid standalone modules, so they get one clean namespace each. The 3 already-clean services are left alone. |
+| D3 | **Single `pom.xml`** = union of all module deps, pinned to **Spring Boot 3.2.2 / Java 17**. 3.4.5 services aligned down to 3.2.2. **Lombok bumped to 1.18.38** (the 1.18.30 pinned by Boot 3.2.2 cannot run its annotation processor on the JDK present here — pre-existing build blocker, see change log). | One deployable ⇒ one classpath ⇒ one Spring Boot line. Lombok bump is a *necessary* change, not cosmetic: nothing compiles without it. |
+| D4 | **One shared datasource** (one Postgres). Each module keeps its **own Flyway migration folder** `db/migration/<module>`, all run by the one app. | Single process ⇒ single transaction boundary. Per-module migration folders keep schema ownership legible and each module independently extractable. |
+| D5 | **Sync** cross-module calls (pgr → idgen/workflow/mdms/localization) are rewritten from `RestTemplate` to **injecting the target module's Spring service bean** (in-process). **Async** flows (persister, notifications) move to **Spring Modulith application events** later. Each module's **HTTP controllers stay** so Postman/external callers keep working unchanged. | The point of the modulith: delete the network hop for in-process calls while preserving the external API. Keeping controllers = "call idgen from Postman without interference" (your requirement). |
+| D6 | **`egov-user` + not-in-repo deps (HRMS, boundary, url-shortener)** keep `RestTemplate` over **port-forwarded** hosts. `egov-user` is explicitly **out of scope** for internalization (Spring Boot 1.5 / Java 8). | user = unportable without a full 1.5→3.2 / javax→jakarta migration; others = no source. Genuinely remote dependencies. |
+| D7 | **Single `application.properties`** at `application/src/main/resources`. Existing per-service keys are merged; where two services used the same key for different things, the module's keys are prefixed. Shared infra (datasource, kafka) declared once. | One process ⇒ one config source of truth. |
+| D8 | **`git init` + commit after every edit**, linear history on the default branch. | The commit log itself is the change-tracking artifact (paired with this doc); each step is trivially `diff`-able against the microservice reference. |
 
 ---
 
 ## 5. Phased plan
 
-- [ ] **Phase 0 — Foundation.** Single entry point at `org.egov`; add `spring-modulith`
-      dependencies + BOM to PGR's pom; package-info module descriptors; a
-      `ModularityTests` running `ApplicationModules.verify()`.
-- [ ] **Phase 1 — idgen (pilot).** Repackage `org.egov.id`→`org.egov.idgen`; merge pom deps;
-      merge properties; point shared datasource; rewrite PGR `IdGenRepository` to a direct call.
-- [ ] **Phase 2 — mdms-v2.** `org.egov.infra`→`org.egov.mdms`; rewrite PGR `MDMSUtils`.
-- [ ] **Phase 3 — localization.** `org.egov.*`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`.
-- [ ] **Phase 4 — workflow.** `org.egov.wf` already clean; rewrite PGR `WorkflowService`.
-- [ ] **Phase 5 — persister.** `org.egov.infra`→`org.egov.persister`; wire kafka in same app.
-- [ ] **Phase 6 — events.** Convert async paths to Spring Modulith events (D7).
-- [ ] **Phase 7 — egov-user.** Spring Boot 1.5→3.2 / javax→jakarta migration, then internalize.
+- [ ] **Phase 0 — Foundation.** Create `application/` (seeded from `pgr-services`, the host).
+      Single entry point `org.egov.Application` (`@SpringBootApplication @Modulithic`,
+      explicit `scanBasePackages`); single pom with `spring-modulith` BOM + starters and the
+      Lombok 1.18.38 fix; `ModularityTests` running `ApplicationModules.verify()`.
+- [ ] **Phase 1 — idgen.** Bring `org.egov.id` into `application` (no repackage); drop its
+      `main()`; merge pom deps + properties + `db/migration/idgen`; rewrite PGR
+      `IdGenRepository` from HTTP to a direct `IdGenerationService` bean call.
+- [ ] **Phase 2 — mdms-v2.** `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; merge; rewrite PGR `MDMSUtils`.
+- [ ] **Phase 3 — localization.** `org.egov.{config,web,...}`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`.
+- [ ] **Phase 4 — workflow.** `org.egov.wf` already clean; merge; rewrite PGR `WorkflowService`.
+- [ ] **Phase 5 — persister.** `org.egov.infra.persist.*`→`org.egov.persist.*`; wire kafka in the one app.
+- [ ] **Phase 6 — events.** Convert async paths (persister, notifications) to Spring Modulith events.
+- [ ] **egov-user — OUT OF SCOPE.** Stays an HTTP/port-forward dependency (Spring Boot 1.5 / Java 8).
 
 Each phase = its own change-log section in §6 and stays independently buildable.
 
@@ -129,12 +135,15 @@ Each phase = its own change-log section in §6 and stays independently buildable
 > Append one subsection per concrete change. Template:
 > **[Phase N.x] <title>** — *What:* … *Why (first principles):* … *Monolith vs Modulith:* …
 
-### [Phase 0.0] Create `pgr-modulith/` reference-preserving workspace
-- **What:** Copied `pgr-services/` → `pgr-modulith/` (minus `target/`). The 7 original folders
-  are now the *microservice reference*; `pgr-modulith/` is the *single-app modulith* we grow.
-- **Why (first principles):** A refactor of this size needs a reversible baseline. Keeping the
-  microservice version bootable next to the modulith lets us A/B the two structures and verify
-  behavior parity (same endpoints, same responses) rather than trusting the rewrite blindly.
-- **Microservice vs Modulith:** In microservices the "comparison" would be across repos; here
-  both live in one tree so a single `diff` shows exactly what collapsing axis-2 (distribution)
-  costs and saves.
+### [Phase -1] Plan revised to final minimal-change structure
+- **What:** Dropped the earlier `pgr-modulith/` experiment and the `org.egov.platform` + full
+  `api/internal` split. Agreed final target: a new `application/` project = single pom + single
+  `application.properties` + single db-migration, with each service as one module sub-package of
+  `org.egov`. The 6 source folders stay as the microservice reference; `egov-user` is out of scope.
+- **Why (first principles):** "Minimal changes" means *only* the moves that are strictly required
+  to make one app boot with separated modules. `pgr`/`id`/`wf` already have clean distinct
+  packages, so they don't move; only the collision/generic packages (mdms, persister, localization)
+  get one clean namespace each. Everything else is left byte-for-byte.
+- **Microservice vs Modulith:** Microservices enforce module boundaries with the network (one
+  process each). The modulith keeps the boundaries (distinct module packages, in-process calls
+  through service beans) but deletes the network, the N deployments, and the N configs.
