@@ -13,11 +13,14 @@
 Convert the current **microservice layout** (7 independently bootable Spring Boot apps in
 sibling folders) into **one Spring Boot application** structured with **Spring Modulith**:
 
-- **`pgr-services` is the main/host application.** It owns the single entry point
-  (`@SpringBootApplication`), the single `pom.xml`, and the single `application.properties`.
-- The other services become **modules inside the same application** (same JVM, same process).
-- **Existing endpoints stay reachable.** e.g. calling `egov-idgen/id/_generate` from Postman
-  must still work exactly as before — internalizing a service must not remove its HTTP surface.
+- **No "main" service — all modules are peers.** A single neutral launcher (`org.egov.Application`,
+  just a bootstrap) owns the one `@SpringBootApplication`, one `pom.xml`, one `application.properties`.
+  Every former service is an equal-weight module; each keeps its **own API path** (its old context
+  path) and its **own migration folder**, so each is testable independently exactly as before.
+  *(Earlier drafts wrongly treated pgr-services as the host; corrected in change-log [R.7].)*
+- Each service becomes a **module inside the same application** (same JVM, same process).
+- **Existing endpoints stay reachable at their ORIGINAL paths.** e.g. `POST /egov-idgen/id/_generate`
+  works exactly as before — NOT nested under any other module's context path.
 - **Synchronous** integrations between PGR and `user / workflow / idgen / mdms / localization`
   stop being HTTP calls and become **in-process calls across module boundaries** (the point
   of a modulith). **Asynchronous** flows (persister, notifications) will later use
@@ -593,3 +596,40 @@ Started Application in 9.495 seconds
 - ⏳ **Data-dependent behavior** (real complaint create→workflow→persist) needs DB **schema seeded**
   (Flyway is disabled; tables not yet created) and the **persister** container consuming
   `save-pgr-request*`. Booting persister + seeding schema is the next step for a true end-to-end test.
+
+### [R.7] Correction — every module is a PEER (no "main", no shared context path)
+- **Feedback that drove this:** treating `pgr` as the "main"/host leaked into (a) a global
+  `server.servlet.context-path=/pgr-services` that prefixed *every* module's API (so idgen sat at
+  `/pgr-services/egov-idgen/...` — wrong, coupled), and (b) naming pgr's migration folder `main`
+  (implying primacy). In a microservice→modulith move each module has **equal value** and must be
+  testable on its **own original URL**, exactly as if run alone.
+- **Changes (all minimal):**
+  1. **Removed the global context path** (`server.*context-path` deleted from properties).
+  2. **Per-module path prefixes** restored each service's original context path, scoped by package,
+     in `Application.configurePathMatch` (no new class — the neutral launcher implements
+     `WebMvcConfigurer`):
+     ```java
+     @Override public void configurePathMatch(PathMatchConfigurer c) {
+         c.addPathPrefix("/pgr-services",     HandlerTypePredicate.forBasePackage("org.egov.pgr"));
+         c.addPathPrefix("/egov-idgen",       HandlerTypePredicate.forBasePackage("org.egov.id"));
+         c.addPathPrefix("/egov-workflow-v2", HandlerTypePredicate.forBasePackage("org.egov.wf"));
+         c.addPathPrefix("/mdms-v2",          HandlerTypePredicate.forBasePackage("org.egov.mdmsv2"));
+         c.addPathPrefix("/localization",     HandlerTypePredicate.forBasePackage("org.egov.localization"));
+     }
+     ```
+  3. **Renamed** `db/migration/main` → `db/migration/pgr` (pgr owns its migrations like every other
+     module: `idgen`, `mdmsv2`, `localization`, `workflow`); updated `flyway.locations`.
+  4. Re-worded `Application`'s Javadoc: it is a **neutral launcher**, not a main module.
+- **Verified (boot on :8280, context path now `''`):** each module answers ONLY at its original URL
+  and its handler actually runs —
+  | module | URL | body proves |
+  |---|---|---|
+  | idgen | `POST /egov-idgen/id/_generate` | real response `status: SUCCESSFUL` |
+  | mdms | `POST /mdms-v2/v1/_search` | handler ran (errors only on missing data) |
+  | workflow | `POST /egov-workflow-v2/egov-wf/businessservice/_search` | handler ran (`PreparedStatement` → needs schema) |
+  | localization | `POST /localization/messages/v1/_search` | handler ran (`JDBC exception` → needs schema) |
+  | pgr | `POST /pgr-services/v1/_create` | handler ran |
+  Wrong/coupled paths (e.g. `/pgr-services/egov-idgen/...`) return "No static resource" — confirming
+  modules are decoupled, not nested under pgr.
+- **Note on HTTP codes:** the eGov tracer wraps all responses (even 404s) as HTTP 200 with a status
+  body, so correctness is judged by the **body**, not the status code.
