@@ -675,3 +675,27 @@ Started Application in 9.495 seconds
   workflow publish to Kafka, an independent persister consumes and writes — which is the decoupling
   the user wants to preserve (and the reason persister is NOT being absorbed as a module). The
   modulith only changed *synchronous* in-process calls; the async pipeline is untouched.
+
+### [R.9] Seed all modules' schema into the ONE shared Postgres
+- **Why:** one shared datasource (D4) means every module's tables must live in the single
+  `platform` DB — not just pgr's. A real PGR create touches pgr, workflow and mdms tables; the
+  persister writes pgr/workflow rows.
+- **How:** ran each module's Flyway migrations into `platform`, each with its **own history table**
+  so their independent version numbers don't collide in one schema:
+  ```bash
+  flyway -url=jdbc:postgresql://localhost:5433/platform -user=postgres -password=postgres \
+    -table=<module>_flyway_history -locations=filesystem:<module-migration-dir> \
+    -baselineOnMigrate=true -outOfOrder=true migrate
+  ```
+  | module | locations | applied |
+  |---|---|---|
+  | pgr | `db/migration/pgr` | 4 → `eg_pgr_service_v2`, `eg_pgr_address_v2`, `eg_pgr_document_v2` |
+  | idgen | `idgen/main` + `idgen/seed` | 51 → `id_generator` (+ seeded id formats) |
+  | mdms-v2 | `mdmsv2/main` | 2 → `eg_mdms_data`, `eg_mdms_schema_definition` |
+  | localization | `localization/ddl` | 4 → `message` |
+  | workflow | `workflow/main` | 12 → `eg_wf_*` (processinstance, state, action, businessservice, …) |
+  18 tables total in `public`. Per-module history tables (`<module>_flyway_history`) keep schema
+  ownership legible — the modulith equivalent of each microservice owning its own DB.
+- **Monolith vs Modulith:** a monolith would have one tangled schema with no ownership; microservices
+  have N physically separate DBs. The modulith keeps **one** DB (single transaction) but preserves
+  **logical** ownership via per-module migration folders + history tables.
