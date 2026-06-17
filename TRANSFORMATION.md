@@ -419,3 +419,35 @@ Each phase = its own change-log section in §6 and stays independently buildable
     two `WorkflowService` classes would just be an ugly name clash to "solve" by renaming domain code.
   - *Modulith (this):* PGR depends only on workflow's `service`/`service-v1`/`models` named
     interfaces; the clash is solved by infrastructure (bean namer), not by touching domain code.
+
+---
+
+## 7. Current status
+
+**Single Spring Modulith app `application/` — builds on JDK 17, `ApplicationModules.verify()` green.**
+
+| Module | Package | Source | PGR → it | Status |
+|---|---|---|---|---|
+| pgr (host) | `org.egov.pgr` | unchanged | — | ✅ |
+| idgen | `org.egov.id` | unchanged | in-process `IdGenerationService` | ✅ Phase 1 |
+| mdms-v2 | `org.egov.mdmsv2` | repackaged from `org.egov.infra.mdms` | in-process `MDMSService` | ✅ Phase 2 |
+| localization | `org.egov.localization` | repackaged from `org.egov.{config,web,..}` | in-process `MessageService` | ✅ Phase 3 |
+| workflow | `org.egov.wf` | unchanged | in-process `WorkflowService`/`BusinessMasterServiceV1` | ✅ Phase 4 |
+| persister | `org.egov.persist` | (not yet) | async (kafka/events) | ⏳ Phase 5/6 |
+| **egov-user** | — | **stays a microservice** | **HTTP / port-forward** | ⛔ out of scope (Spring Boot 1.5 / Java 8) |
+
+**Sync HTTP eliminated for all in-scope modules.** Remaining `RestTemplate` use in `pgr` is only
+for genuinely-remote dependencies: `egov-user` (`UserUtils`, `ServiceRequestValidator`),
+HRMS (`HRMSUtil`), SMS/notification sender + migration (`NotificationUtil`, `MigrationUtils`) — all
+via the generic `ServiceRequestRepository`, all pointed at port-forwarded hosts (D6).
+
+**Remaining work:** Phase 5 (absorb persister as a co-located kafka consumer) and Phase 6 (turn the
+async write/notification paths into Spring Modulith `@ApplicationModuleListener` events). Both were
+explicitly deferred.
+
+**How to build/verify:**
+```bash
+cd application
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 mvn -o test -Dtest=ModularityTests   # boundaries
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 mvn -o clean package                 # one fat jar
+```
