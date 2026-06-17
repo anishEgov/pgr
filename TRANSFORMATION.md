@@ -734,3 +734,52 @@ Started Application in 9.495 seconds
   independent persister consumes and persists to the shared DB — the async write path is preserved
   unchanged. The only thing between "publish a complaint event" and "PGR API end-to-end" is seeding
   real env data (citizen + MDMS masters) into the shared DB, which is operational, not architectural.
+
+### [R.11] ✅ Full API-driven end-to-end: PGR create → Kafka → persister → DB
+Drove a real complaint through the modulith and watched it persist via the independent persister.
+
+**Flow proven:**
+```
+POST /pgr-services/v2/request/_create   (modulith, employee-initiated, tenant dev)
+  ├─ mdmsUtils.mDMSCall        → in-process MDMS module (validateMDMS is commented out → non-blocking)
+  ├─ idgen                     → in-process IdGenerationService → PB-PGR-2026-06-17-000007
+  ├─ enrich/user               → egov-user (port-forwarded from unified-dev) — finds existing citizen
+  ├─ workflowService.transition→ in-process workflow module: CREATE → PENDING_ASSIGNMENT
+  └─ producer.push("save-pgr-request", request) ─────────► Kafka topic save-pgr-request
+                                                                  │
+                                                                  ▼
+                                                      egov-persister (separate service) consumes
+                                                                  │
+                                                                  ▼
+                                          eg_pgr_service_v2 (1 row) + eg_pgr_address_v2 (1 row)
+```
+DB after:
+```
+servicerequestid         | tenantid | servicecode           | applicationstatus
+PB-PGR-2026-06-17-000007 | dev      | StreetLightNotWorking | PENDING_ASSIGNMENT
+doorno 12 | plotno 7 | city CityA | pincode 560001 | district DistA
+```
+
+**What it took to get a real create through (all environment/data, not modulith code):**
+1. **idgen config** (`application.properties`): `idformat.from.mdms=false` + `autocreate.request.seq=true`
+   so idgen uses PGR's own format (`PB-PGR-...-[SEQ_EG_PGR_ID]`) instead of an MDMS lookup; created
+   `SEQ_EG_PGR_ID` once (idgen's auto-create aborted inside the failed-NEXTVAL transaction).
+2. **user**: employee-initiated request + an **existing** citizen (RITIK, mobile 9898989899) so
+   `upsertUser` searches (not creates) — avoids unified-dev's failing encryption service. Requester
+   roles must include one allowed by the `CREATE` action (`SYSTEM_ADMINISTRATOR`).
+3. **workflow businessservice**: fetched PGR config from unified-dev and seeded it into the LOCAL
+   workflow via the modulith's `businessservice/_create` — which itself went modulith → Kafka
+   `save-wf-businessservice` → persister → `eg_wf_*` (1 businessservice + 6 states + 7 actions).
+   Had to send `nextState` as state **names** (the enricher only remaps names→new uuids; a uuid is
+   left as-is → broken graph).
+4. **config-merge fix**: `egov.user.search.endpoint` needed a **leading slash** — workflow builds
+   `host+endpoint` and the merged `egov.user.host` (from pgr) has no trailing slash (standalone wf's
+   host did), which had produced `http://localhost:8081user/_search`.
+5. **address payload**: the persist config strictly maps every address field
+   (`geoLocation.latitude`, …) — JsonPath is strict, so the request must carry them.
+
+**Bottom line:** the modulith behaves exactly like the microservices on the wire — it produces the
+same `save-pgr-request` event, and the **independent egov-persister** consumes it and writes to the
+shared DB. Every cross-module hop PGR used to make over HTTP (idgen, mdms, workflow) is now an
+in-process call; only genuinely-external deps (user) remain HTTP via port-forward; persistence
+stays async via Kafka — unchanged.
