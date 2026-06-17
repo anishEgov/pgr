@@ -120,7 +120,7 @@ in its own phase. The Spring Boot 3.x services are internalized first.
       `main()`; merged pom deps + properties + `db/migration/idgen`; rewrote PGR
       `IdGenRepository` from HTTP to a direct `IdGenerationService` bean call. ✅ compiles + verify().
 - [x] **Phase 2 — mdms-v2.** `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; merge; rewrite PGR `MDMSUtils`. ✅ compiles + verify().
-- [ ] **Phase 3 — localization.** `org.egov.{config,web,...}`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`.
+- [x] **Phase 3 — localization.** `org.egov.{config,web,...}`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`. ✅ compiles + verify().
 - [ ] **Phase 4 — workflow.** `org.egov.wf` already clean; merge; rewrite PGR `WorkflowService`.
 - [ ] **Phase 5 — persister.** `org.egov.infra.persist.*`→`org.egov.persist.*`; wire kafka in the one app.
 - [ ] **Phase 6 — events.** Convert async paths (persister, notifications) to Spring Modulith events.
@@ -296,3 +296,60 @@ Each phase = its own change-log section in §6 and stays independently buildable
   - *Monolith:* PGR would call repositories/enrichers directly — no boundary, mdms un-extractable.
   - *Modulith (this):* PGR reaches mdms only through `service` + `model` named interfaces;
     `verify()` proved it (it rejected the un-exposed builder until we published `model`).
+### [Phase 3] localization — repackaged, absorbed, called in-process (brings JPA + Redis)
+- **Files added / changed:**
+  - `org/egov/localization/**` (36 files) — copied from localization's five generic roots
+    `org.egov.{config,web,util,domain,persistence}` and repackaged to `org.egov.localization.*`
+    (per-root `sed`). `LocalizationServiceApplication` (the `main()`) left behind.
+  - `db/migration/localization/**` — localization migrations (D4).
+  - `org/egov/localization/package-info.java` — module descriptor.
+  - named interfaces: `domain/service` (`service`), `domain/model` (`model`),
+    `web/contract` (`contract`).
+  - `pom.xml` — `spring-boot-starter-data-jpa`, `spring-boot-starter-data-redis`,
+    `commons-io:2.15.1`, `commons-lang3`.
+  - `application.properties` — JPA (`ddl-auto=none`, etc.) + `spring.redis.host/port`.
+  - `Application.java` — added `org.egov.localization` to `scanBasePackages`.
+  - `pgr/util/NotificationUtil.java` — HTTP → in-process (below).
+- **Build errors hit & fixed (in order):**
+  1. `package org.springframework.data.redis.* does not exist` and JPA repository/entity symbols
+     not found → localization persists messages with **Spring Data JPA** and caches them in
+     **Redis**. **Fix:** add `spring-boot-starter-data-jpa` + `spring-boot-starter-data-redis`
+     (+ `commons-io`/`commons-lang3`). *Architectural note:* this adds a JPA `EntityManager` over
+     the shared datasource and a Redis client — **a Redis server is now required at runtime**.
+  2. **verify() violation:** `Module Pgr uses field injection in
+     org.egov.pgr.util.NotificationUtil.messageService. Prefer constructor injection instead!`
+     Modulith forbids reaching another module's bean via `@Autowired` field injection — the
+     dependency must be visible in the constructor. **Fix:** constructor-inject `messageService`
+     + `mapper` (the other, intra-module, fields can stay field-injected).
+- **Code — the call boundary (`pgr/util/NotificationUtil.java`):**
+
+  ```java
+  // ── BEFORE (microservice): HTTP GET/POST to localization /messages/v1/_search ─
+  public String getLocalizationMessages(String tenantId, RequestInfo ri, String module) {
+      LinkedHashMap responseMap = (LinkedHashMap) serviceRequestRepository.fetchResult(
+              getUri(tenantId, ri, module), ri);          // builds URL host+contextPath+endpoint+?locale=...
+      return new JSONObject(responseMap).toString();
+  }
+  ```
+  ```java
+  // ── AFTER (modulith): in-process call into the localization module ────────────
+  public String getLocalizationMessages(String tenantId, RequestInfo ri, String module) {
+      tenantId = centralInstanceUtil.getStateLevelTenant(tenantId);
+      String locale = /* from ri.getMsgId() "msgId|locale", else default */;
+      MessageSearchCriteria criteria = MessageSearchCriteria.builder()
+              .locale(locale).tenantId(new Tenant(tenantId)).module(module).build();
+      List<org.egov.localization.domain.model.Message> domain = messageService.getFilteredMessages(criteria);
+      MessagesResponse response = new MessagesResponse(domain.stream()
+              .map(org.egov.localization.web.contract.Message::new).collect(Collectors.toList()));
+      return new JSONObject(mapper.convertValue(response, Map.class)).toString();  // same {"messages":[...]} shape
+  }
+  ```
+- **Why (first principles):** PGR needs "the localized message templates for this module/locale."
+  The controller answers that by running `getFilteredMessages` and wrapping the result; in-process
+  we do the very same thing and serialize to the identical JSON string the rest of NotificationUtil
+  already parses with JsonPath — so only the *transport* changed, never the contract.
+- **Microservice vs Monolith vs Modulith:**
+  - *Microservice:* HTTP + URL query params; localization owns its DB + Redis; separate deploy.
+  - *Monolith:* PGR would query the message JPA repo / cache directly — no boundary.
+  - *Modulith (this):* PGR depends only on localization's `service`/`model`/`contract` named
+    interfaces, via constructor injection that `verify()` insists on — coupling stays explicit.

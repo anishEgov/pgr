@@ -38,10 +38,10 @@ import java.util.TimeZone;
 @ComponentScan(basePackages = {
         "org.egov.pgr",
         "org.egov.id",              // Phase 1 — idgen (wired: pgr calls IdGenerationService in-process)
-        "org.egov.mdmsv2"           // Phase 2 — mdms (wired: pgr calls MDMSService in-process)
+        "org.egov.mdmsv2",          // Phase 2 — mdms (wired: pgr calls MDMSService in-process)
+        "org.egov.localization"     // Phase 3 — localization (wired: pgr calls MessageService in-process)
         // , "org.egov.wf"          // Phase 4 — workflow
         // , "org.egov.persist"     // Phase 5 — persister
-        // , "org.egov.localization"// Phase 3 — localization
 })
 @Import({TracerConfiguration.class, MultiStateInstanceUtil.class})
 public class Application {

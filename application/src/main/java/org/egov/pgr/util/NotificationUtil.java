@@ -1,10 +1,15 @@
 package org.egov.pgr.util;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jayway.jsonpath.JsonPath;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.egov.common.contract.request.RequestInfo;
 import org.egov.common.utils.MultiStateInstanceUtil;
+import org.egov.localization.domain.model.MessageSearchCriteria;
+import org.egov.localization.domain.model.Tenant;
+import org.egov.localization.domain.service.MessageService;
+import org.egov.localization.web.contract.MessagesResponse;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.producer.Producer;
 import org.egov.pgr.repository.ServiceRequestRepository;
@@ -18,6 +23,7 @@ import org.springframework.util.CollectionUtils;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
+import java.util.stream.Collectors;
 import static org.egov.pgr.util.PGRConstants.*;
 
 @Component
@@ -39,19 +45,47 @@ public class NotificationUtil {
     @Autowired
     private MultiStateInstanceUtil centralInstanceUtil;
 
+    // [Phase 3] in-process handle to the localization module + mapper to keep the JSON-string shape.
+    // Constructor-injected: Spring Modulith's verify() requires cross-module dependencies to use
+    // constructor injection (it rejected field injection here) so the module coupling is explicit.
+    private final MessageService messageService;
+
+    private final ObjectMapper mapper;
+
+    @Autowired
+    public NotificationUtil(MessageService messageService, ObjectMapper mapper) {
+        this.messageService = messageService;
+        this.mapper = mapper;
+    }
+
 
     /**
+     * Fetch localized messages from the in-process localization module.
+     *
+     * <p><b>Modulith change (Phase 3, D5):</b> was an HTTP GET/POST to {@code egov.localization.host}
+     * {@code /messages/v1/_search} via {@code serviceRequestRepository.fetchResult(...)}. Now we
+     * call the localization module's {@link MessageService#getFilteredMessages} directly and rebuild
+     * the same {@code MessagesResponse} the controller returns, then serialize it to the JSON string
+     * the rest of NotificationUtil already JsonPath-parses — so callers are unchanged.
      *
      * @param tenantId Tenant ID
-     * @param requestInfo Request Info object
+     * @param requestInfo Request Info object (its msgId may carry the locale as {@code msgId|locale})
      * @param module Module name
-     * @return Return Localisation Message
+     * @return localization messages as a JSON string (shape {@code {"messages":[...]}})
      */
     public String getLocalizationMessages(String tenantId, RequestInfo requestInfo,String module) {
-        @SuppressWarnings("rawtypes")
-        LinkedHashMap responseMap = (LinkedHashMap) serviceRequestRepository.fetchResult(getUri(tenantId, requestInfo, module),
-                requestInfo);
-        return new JSONObject(responseMap).toString();
+        tenantId = centralInstanceUtil.getStateLevelTenant(tenantId);
+        String locale = NOTIFICATION_LOCALE;
+        if (!StringUtils.isEmpty(requestInfo.getMsgId()) && requestInfo.getMsgId().split("\\|").length >= 2)
+            locale = requestInfo.getMsgId().split("\\|")[1];
+
+        MessageSearchCriteria criteria = MessageSearchCriteria.builder()
+                .locale(locale).tenantId(new Tenant(tenantId)).module(module).build();
+        List<org.egov.localization.domain.model.Message> domainMessages =
+                messageService.getFilteredMessages(criteria);
+        MessagesResponse response = new MessagesResponse(domainMessages.stream()
+                .map(org.egov.localization.web.contract.Message::new).collect(Collectors.toList()));
+        return new JSONObject(mapper.convertValue(response, Map.class)).toString();
     }
 
     /**
