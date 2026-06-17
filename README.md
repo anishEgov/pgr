@@ -60,6 +60,31 @@ kubectl -n egov port-forward svc/egov-user 8081:8080
 
 ## 2. Working API calls (request + response)
 
+### 2.0 (setup) create a test user — `POST /user/users/_createnovalidate`
+PGR's create flow needs a citizen/user. Create a dedicated **test** user via the port-forwarded
+`egov-user` (`:8081`). Give it a role allowed by the workflow `CREATE` action (e.g.
+`SYSTEM_ADMINISTRATOR`). Replace `<AUTH_TOKEN>` / `<REQUESTER_UUID>` with a valid admin's token/uuid.
+```bash
+curl -s -X POST http://localhost:8081/user/users/_createnovalidate \
+  -H "Content-Type: application/json" -d '{
+  "RequestInfo":{"apiId":"Rainmaker","authToken":"<AUTH_TOKEN>","msgId":"1761036073664|en_IN",
+    "userInfo":{"uuid":"<REQUESTER_UUID>","type":"EMPLOYEE","tenantId":"dev",
+      "roles":[{"code":"SYSTEM_ADMINISTRATOR","tenantId":"dev"}]},"plainAccessRequest":{}},
+  "user":{"userName":"SUPERUSER_1","name":"Admin User 2","mobileNumber":"9898989899","type":"EMPLOYEE",
+    "active":true,"password":"eGov@1234","emailId":"xyz@gmail.com","tenantId":"dev",
+    "roles":[{"name":"Super User","code":"SUPERUSER","tenantId":"dev"},
+             {"name":"System Administrator","code":"SYSTEM_ADMINISTRATOR","tenantId":"dev"},
+             {"name":"HELPDESK USER","code":"HELPDESK_USER","tenantId":"dev"},
+             {"name":"Distributor","code":"DISTRIBUTOR","tenantId":"dev"}]}}'
+```
+```json
+{"responseInfo":{"status":"200"},
+ "user":[{"id":39179,"uuid":"7b588c39-44ee-4c1b-93ef-69830f74368d","userName":"SUPERUSER_1",
+   "name":"Admin User 2","mobileNumber":"9898989899","type":"EMPLOYEE","tenantId":"dev","active":true,
+   "roles":[{"code":"SUPERUSER"},{"code":"SYSTEM_ADMINISTRATOR"},{"code":"HELPDESK_USER"},{"code":"DISTRIBUTOR"}]}]}
+```
+Use the returned `uuid` (`7b588c39-…`) as `userInfo.uuid` in the PGR create below.
+
 ### 2.1 idgen — `POST /egov-idgen/id/_generate`
 ```bash
 # (one-time) the format references a DB sequence; idgen auto-creates it, or pre-create:
@@ -132,11 +157,11 @@ curl -s -X POST http://localhost:8280/pgr-services/v2/request/_create \
   -H "Content-Type: application/json" -d '{
   "RequestInfo":{"apiId":"Rainmaker","ver":".01","ts":1234,"action":"_create","msgId":"20170310130900|en_IN",
     "authToken":"<AUTH_TOKEN>",
-    "userInfo":{"id":35611,"uuid":"05475c6f-4c5f-4b60-94d6-b89804cee889","userName":"SUPERUSER","name":"RITIK VERMA",
+    "userInfo":{"id":39179,"uuid":"7b588c39-44ee-4c1b-93ef-69830f74368d","userName":"SUPERUSER_1","name":"Admin User 2",
       "mobileNumber":"9898989899","type":"EMPLOYEE","tenantId":"dev",
       "roles":[{"code":"SYSTEM_ADMINISTRATOR","tenantId":"dev"}]}},
   "service":{"tenantId":"dev","serviceCode":"StreetLightNotWorking","description":"modulith e2e","source":"web",
-    "citizen":{"name":"RITIK VERMA","mobileNumber":"9898989899","type":"CITIZEN","tenantId":"dev"},
+    "citizen":{"name":"Admin User 2","mobileNumber":"9898989899","type":"CITIZEN","tenantId":"dev"},
     "address":{"tenantId":"dev","doorNo":"12","plotNo":"7","buildingName":"Block A","street":"MG Road",
       "landmark":"Near Park","city":"CityA","pincode":"560001","locality":{"code":"SUN01"},"district":"DistA",
       "region":"RegionA","state":"StateA","country":"India","geoLocation":{"latitude":12.97,"longitude":77.59},
@@ -160,13 +185,13 @@ select servicerequestid, tenantid, servicecode, applicationstatus from eg_pgr_se
 ```bash
 curl -s -X POST "http://localhost:8280/pgr-services/v2/request/_search?tenantId=dev" \
   -H "Content-Type: application/json" -d '{"RequestInfo":{"apiId":"Rainmaker","ver":".01","ts":1234,"authToken":"<AUTH_TOKEN>",
-    "userInfo":{"uuid":"05475c6f-4c5f-4b60-94d6-b89804cee889","type":"EMPLOYEE","tenantId":"dev",
+    "userInfo":{"uuid":"7b588c39-44ee-4c1b-93ef-69830f74368d","type":"EMPLOYEE","tenantId":"dev",
       "roles":[{"code":"SYSTEM_ADMINISTRATOR","tenantId":"dev"}]}}}'
 ```
 ```json
 {"responseInfo":{"status":"successful"},
  "ServiceWrappers":[{"service":{"active":true,"serviceRequestId":"PB-PGR-2026-06-17-000007","tenantId":"dev",
-   "applicationStatus":"PENDING_ASSIGNMENT","citizen":{"id":39178,"userName":"9898989899","name":"RITIK VERMA"}},
+   "applicationStatus":"PENDING_ASSIGNMENT","citizen":{"id":39179,"userName":"SUPERUSER_1","name":"Admin User 2"}},
    "workflow":{...}}]}
 ```
 
