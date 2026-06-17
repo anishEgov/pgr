@@ -119,7 +119,7 @@ in its own phase. The Spring Boot 3.x services are internalized first.
 - [x] **Phase 1 — idgen.** Brought `org.egov.id` into `application` (no repackage); dropped its
       `main()`; merged pom deps + properties + `db/migration/idgen`; rewrote PGR
       `IdGenRepository` from HTTP to a direct `IdGenerationService` bean call. ✅ compiles + verify().
-- [ ] **Phase 2 — mdms-v2.** `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; merge; rewrite PGR `MDMSUtils`.
+- [x] **Phase 2 — mdms-v2.** `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; merge; rewrite PGR `MDMSUtils`. ✅ compiles + verify().
 - [ ] **Phase 3 — localization.** `org.egov.{config,web,...}`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`.
 - [ ] **Phase 4 — workflow.** `org.egov.wf` already clean; merge; rewrite PGR `WorkflowService`.
 - [ ] **Phase 5 — persister.** `org.egov.infra.persist.*`→`org.egov.persist.*`; wire kafka in the one app.
@@ -233,3 +233,66 @@ Each phase = its own change-log section in §6 and stays independently buildable
   - *Modulith (this):* direct bean call **through a published interface only**; `verify()` fails
     the build if PGR touches idgen's internals. Fast like a monolith, bounded like a microservice,
     and the named interface is the exact seam to re-extract idgen later.
+
+### [Phase 2] mdms-v2 — repackaged, absorbed, called in-process
+- **Files added / changed:**
+  - `org/egov/mdmsv2/**` (48 files) — copied from `mdms-v2`'s `org.egov.infra.mdms.*`, repackaged
+    to `org.egov.mdmsv2.*` via `sed 's/org.egov.infra.mdms/org.egov.mdmsv2/g'`. `MDMSApplication`
+    (the `main()`) left behind.
+  - `db/migration/mdmsv2/**` — mdms migrations (per-module ownership, D4).
+  - `org/egov/mdmsv2/package-info.java` — module descriptor (displayName `mdms-v2`).
+  - `org/egov/mdmsv2/service/package-info.java` — `@NamedInterface("service")`.
+  - `org/egov/mdmsv2/model/package-info.java` — `@NamedInterface("model")` (added after a verify()
+    violation, see below).
+  - `pom.xml` — added `org.everit.json:org.everit.json.schema:1.5.1`, `org.json:json:20231013`,
+    `commons-beanutils:1.11.0`, `io.swagger.core.v3:swagger-annotations:2.2.8`,
+    `org.egov.services:services-common:2.0.0-SNAPSHOT`.
+  - `application.properties` — mdms kafka topics + `mdms.default.offset/limit`.
+  - `Application.java` — added `org.egov.mdmsv2` to `scanBasePackages`.
+  - `pgr/util/MDMSUtils.java` — HTTP → in-process (below).
+- **Build errors hit & fixed (in order):**
+  1. `package io.swagger.v3.oas.annotations.media does not exist` and `package org.everit.json.schema
+     does not exist` → mdms models use Swagger v3 annotations and everit JSON-schema validation that
+     PGR's classpath lacked. **Fix:** add the five deps above (all present in mdms-v2's own pom).
+  2. `incompatible types: org.egov.mdms.model.MdmsCriteriaReq cannot be converted to
+     org.egov.mdmsv2.model.MdmsCriteriaReq` → I had assumed PGR and mdms shared the mdms-client DTO;
+     in fact **mdms-v2 ships its own copy** of the contract (`MdmsCriteriaReq`, `MdmsResponse`, …).
+     **Fix:** `ObjectMapper.convertValue` PGR's mdms-client `MdmsCriteriaReq` into the module's type
+     at the call boundary (same JSON shape).
+  3. `duplicate import` of `MdmsResponse` → I had both `org.egov.mdms.model.MdmsResponse` and
+     `org.egov.mdmsv2.model.MdmsResponse`. **Fix:** keep only the module's (`mdmsv2.model`).
+  4. **verify() violation** (the boundary catching me): `Module 'pgr' depends on non-exposed type
+     org.egov.mdmsv2.model.MdmsResponse$MdmsResponseBuilder within module 'mdmsv2'`. I had published
+     only `mdmsv2.service`, but PGR also touches `mdmsv2.model`. **Fix:** add
+     `@NamedInterface("model")` to `org.egov.mdmsv2.model`. This is exactly the value of a modulith —
+     the build refuses an un-declared cross-module dependency.
+- **Code — the call boundary (`pgr/util/MDMSUtils.java`):**
+
+  ```java
+  // ── BEFORE (microservice): generic HTTP POST to the mdms service ──────────────
+  public Object mDMSCall(ServiceRequest request){
+      MdmsCriteriaReq mdmsCriteriaReq = getMDMSRequest(ri, stateLevelTenant);   // mdms-client DTO
+      return serviceRequestRepository.fetchResult(getMdmsSearchUrl(), mdmsCriteriaReq); // → host:8082
+  }
+  ```
+  ```java
+  // ── AFTER (modulith): in-process call into the mdmsv2 module ──────────────────
+  public Object mDMSCall(ServiceRequest request){
+      MdmsCriteriaReq mdmsCriteriaReq = getMDMSRequest(ri, stateLevelTenant);   // mdms-client DTO
+      org.egov.mdmsv2.model.MdmsCriteriaReq moduleReq =                          // translate at the seam
+              mapper.convertValue(mdmsCriteriaReq, org.egov.mdmsv2.model.MdmsCriteriaReq.class);
+      Map<String, Map<String, JSONArray>> masters = mdmsService.search(moduleReq);
+      MdmsResponse resp = MdmsResponse.builder().mdmsRes(masters).build();       // mirror the controller
+      return mapper.convertValue(resp, Map.class);                               // same shape as old HTTP
+  }
+  ```
+- **Why (first principles):** PGR's need is "give me these masters for this tenant." The old call
+  answered it with a generic JSON POST whose response PGR re-parsed with JsonPath. In-process we
+  call the very method the mdms controller calls and rebuild the identical `MdmsResponse` envelope,
+  so every downstream `$.MdmsRes...` read is unchanged. The two DTO copies are a microservice
+  artifact (each service vendored the contract); we bridge them once, at the boundary.
+- **Microservice vs Monolith vs Modulith:**
+  - *Microservice:* network POST; mdms owns its data + deploy; PGR couples only to JSON.
+  - *Monolith:* PGR would call repositories/enrichers directly — no boundary, mdms un-extractable.
+  - *Modulith (this):* PGR reaches mdms only through `service` + `model` named interfaces;
+    `verify()` proved it (it rejected the un-exposed builder until we published `model`).

@@ -37,9 +37,9 @@ import java.util.TimeZone;
 @Modulithic(systemName = "eGov Platform Modulith")
 @ComponentScan(basePackages = {
         "org.egov.pgr",
-        "org.egov.id"               // Phase 1 — idgen (wired: pgr calls IdGenerationService in-process)
+        "org.egov.id",              // Phase 1 — idgen (wired: pgr calls IdGenerationService in-process)
+        "org.egov.mdmsv2"           // Phase 2 — mdms (wired: pgr calls MDMSService in-process)
         // , "org.egov.wf"          // Phase 4 — workflow
-        // , "org.egov.mdmsv2"      // Phase 2 — mdms
         // , "org.egov.persist"     // Phase 5 — persister
         // , "org.egov.localization"// Phase 3 — localization
 })

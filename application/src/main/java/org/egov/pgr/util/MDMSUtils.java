@@ -1,11 +1,15 @@
 package org.egov.pgr.util;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import net.minidev.json.JSONArray;
 import org.egov.common.contract.request.RequestInfo;
 import org.egov.common.utils.MultiStateInstanceUtil;
 import org.egov.mdms.model.MasterDetail;
 import org.egov.mdms.model.MdmsCriteria;
 import org.egov.mdms.model.MdmsCriteriaReq;
 import org.egov.mdms.model.ModuleDetail;
+import org.egov.mdmsv2.model.MdmsResponse;
+import org.egov.mdmsv2.service.MDMSService;
 import org.egov.pgr.config.PGRConfiguration;
 import org.egov.pgr.repository.ServiceRequestRepository;
 import org.egov.pgr.web.models.ServiceRequest;
@@ -31,23 +35,45 @@ public class MDMSUtils {
     @Autowired
     private MultiStateInstanceUtil multiStateInstanceUtil;
 
+    // [Phase 2] in-process handle to the mdms module + mapper to keep mDMSCall's Object/Map shape
+    private final MDMSService mdmsService;
+
+    private final ObjectMapper mapper;
+
     @Autowired
-    public MDMSUtils(PGRConfiguration config, ServiceRequestRepository serviceRequestRepository) {
+    public MDMSUtils(PGRConfiguration config, ServiceRequestRepository serviceRequestRepository,
+                     MDMSService mdmsService, ObjectMapper mapper) {
         this.config = config;
         this.serviceRequestRepository = serviceRequestRepository;
+        this.mdmsService = mdmsService;
+        this.mapper = mapper;
     }
 
     /**
-     * Calls MDMS service to fetch pgr master data
-     * @param request
-     * @return
+     * Calls the in-process mdms module to fetch pgr master data.
+     *
+     * <p><b>Modulith change (Phase 2, D5):</b> was an HTTP POST to {@code egov.mdms.host} via
+     * {@code serviceRequestRepository.fetchResult(...)}. Now we call the {@code mdmsv2} module's
+     * {@link MDMSService#search(MdmsCriteriaReq)} directly. The request DTO ({@code MdmsCriteriaReq})
+     * is the shared {@code mdms-client} contract, so no mapping is needed on the way in. We
+     * replicate exactly what {@code MDMSController} did — wrap the master map in an
+     * {@code MdmsResponse} — and convert to a {@code Map} so callers see the same shape the HTTP
+     * response produced ({@code $.MdmsRes...}).
+     *
+     * @param request the PGR service request
+     * @return MDMS master data as a Map, identical in shape to the former HTTP response
      */
     public Object mDMSCall(ServiceRequest request){
         RequestInfo requestInfo = request.getRequestInfo();
         String tenantId = request.getService().getTenantId();
         MdmsCriteriaReq mdmsCriteriaReq = getMDMSRequest(requestInfo,multiStateInstanceUtil.getStateLevelTenant(tenantId));
-        Object result = serviceRequestRepository.fetchResult(getMdmsSearchUrl(), mdmsCriteriaReq);
-        return result;
+        // mdms-v2 carries its own copy of the contract model, so translate PGR's mdms-client
+        // MdmsCriteriaReq into the module's MdmsCriteriaReq at this single boundary.
+        org.egov.mdmsv2.model.MdmsCriteriaReq moduleReq =
+                mapper.convertValue(mdmsCriteriaReq, org.egov.mdmsv2.model.MdmsCriteriaReq.class);
+        Map<String, Map<String, JSONArray>> moduleMasterMap = mdmsService.search(moduleReq);
+        MdmsResponse mdmsResponse = MdmsResponse.builder().mdmsRes(moduleMasterMap).build();
+        return mapper.convertValue(mdmsResponse, Map.class);
     }
 
 
