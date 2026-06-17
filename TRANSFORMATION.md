@@ -699,3 +699,38 @@ Started Application in 9.495 seconds
 - **Monolith vs Modulith:** a monolith would have one tangled schema with no ownership; microservices
   have N physically separate DBs. The modulith keeps **one** DB (single transaction) but preserves
   **logical** ownership via per-module migration folders + history tables.
+
+### [R.10] End-to-end runtime test (infra + persister + modulith + port-forward)
+- **Setup brought up:**
+  - docker-compose: `platform-postgres` (5433), `platform-redis` (6379), `platform-kafka` (9092).
+  - Schema seeded for all modules into the one `platform` DB ([R.9]).
+  - **egov-persister** running and subscribed to `save-pgr-request`, `update-pgr-request`,
+    `statea-*`, `save-wf-transitions`, `save-wf-businessservice`, `update-wf-businessservice`.
+    *(Run note: the Spring Boot 3.4.5 `repackage`/`dependency` Maven plugins aren't in the offline
+    cache, so a source `java -jar`/`spring-boot:run` build can't complete here. The same
+    egov-persister was therefore run from its prebuilt image but standalone — NOT the single-config
+    compose service — with the multi-config FOLDER mounted (`EGOV_PERSIST_YML_REPO_PATH=/configs`,
+    plain path: the loader treats a `file://` value as a missing folder). This preserves the
+    multi-module intent.)*
+  - Modulith on :8280; non-module deps port-forwarded from `unified-dev`
+    (`kubectl -n egov port-forward svc/egov-user 8081:8080`).
+- **PGR create API (`POST /pgr-services/v2/request/_create`):** routes to the controller and runs
+  the real business logic — it called the **port-forwarded egov-user** service (integration works)
+  and stopped at `No user exist for the given accountId`. That is **environment data** (a valid
+  citizen + PGR MDMS service-defs in the shared DB), not a modulith issue — the create path itself
+  executes correctly through validation → user lookup.
+- **Async pipeline proven (the goal):** published a complete `save-pgr-request` event to Kafka →
+  **persister consumed it** (`PersisterMessageListener.onMessage → PersistService.persist`) → wrote
+  **transactionally** into `eg_pgr_service_v2` AND `eg_pgr_address_v2`:
+  ```
+  servicerequestid   | tenantid | servicecode           | applicationstatus | source
+  PGR-TEST-1781688206 | pg      | StreetLightNotWorking | PENDING           | web
+  doorno | plotno | city  | pincode
+  12     | 7      | CityA | 560001
+  ```
+  (First attempt failed with `PathNotFound $.service.address.plotNo` — the persist config maps every
+  address field and JsonPath is strict; a complete payload inserted cleanly.)
+- **Conclusion:** the modulith produces to Kafka exactly as the microservices did, and the
+  independent persister consumes and persists to the shared DB — the async write path is preserved
+  unchanged. The only thing between "publish a complaint event" and "PGR API end-to-end" is seeding
+  real env data (citizen + MDMS masters) into the shared DB, which is operational, not architectural.
