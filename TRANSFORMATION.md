@@ -101,7 +101,7 @@ in its own phase. The Spring Boot 3.x services are internalized first.
 | D1 | **App root package = `org.egov`**, single `@SpringBootApplication @Modulithic` class `org.egov.Application`. Each former service is ONE module = ONE distinct sub-package. **`scanBasePackages` lists the module packages explicitly** so the `org.egov.common`/`org.egov.tracer`/`org.egov.mdms` *library* packages on the classpath are not component-scanned. | Minimal movement: `pgr`,`id`,`wf` already sit on distinct sub-packages of `org.egov`, so they don't move. Rooting at `org.egov` (not a new `org.egov.platform`) avoids repackaging the 3 clean services. The explicit scan list is the price for keeping the bare `org.egov` root clean. |
 | D1a | *(SUPERSEDED — no forced `api/`+`internal/` split.)* Each module stays in its **existing internal sub-structure** (e.g. `pgr.service`, `pgr.web`). Cross-module access discipline is documented and (later) checked via Modulith named-interfaces, not a mass file move now. | "Minimal changes": splitting 250+ files into api/internal is not a *required* change to get a working modulith. Encapsulation can be tightened incrementally once the single app boots. |
 | D2 | **Module package map** (only what *must* move moves): `pgr`→`org.egov.pgr` *(unchanged)*; `idgen`→`org.egov.id` *(unchanged)*; `workflow`→`org.egov.wf` *(unchanged)*; `mdms-v2` `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; `persister` `org.egov.infra.persist.*`→`org.egov.persist.*`; `localization` `org.egov.{config,web,util,domain,persistence}`→`org.egov.localization.*`. | `mdms` can't be named `org.egov.mdms` (the `mdms-client` jar already owns that package). `infra.*` and localization's bare generic packages aren't valid standalone modules, so they get one clean namespace each. The 3 already-clean services are left alone. |
-| D3 | **Single `pom.xml`** = union of all module deps, pinned to **Spring Boot 3.2.2 / Java 17**. 3.4.5 services aligned down to 3.2.2. **Lombok bumped to 1.18.38** (the 1.18.30 pinned by Boot 3.2.2 cannot run its annotation processor on the JDK present here — pre-existing build blocker, see change log). | One deployable ⇒ one classpath ⇒ one Spring Boot line. Lombok bump is a *necessary* change, not cosmetic: nothing compiles without it. |
+| D3 | **Single `pom.xml`** = union of all module deps, pinned to **Spring Boot 3.2.2 / Java 17**. 3.4.5 services aligned down to 3.2.2. **Build with JDK 17** (`JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64`) — the default `mvn` here runs JDK 25, on which Boot-3.2.2's Lombok 1.18.30 annotation processor fails (no getters/`@Slf4j` generated → whole repo won't compile; pre-existing, reproduced on the untouched `pgr-services` too). No pom change needed once JDK 17 is used. | One deployable ⇒ one classpath ⇒ one Spring Boot line. The JDK mismatch is an environment issue, not a transformation change, so we fix it the minimal way: build on the JDK the project already targets. |
 | D4 | **One shared datasource** (one Postgres). Each module keeps its **own Flyway migration folder** `db/migration/<module>`, all run by the one app. | Single process ⇒ single transaction boundary. Per-module migration folders keep schema ownership legible and each module independently extractable. |
 | D5 | **Sync** cross-module calls (pgr → idgen/workflow/mdms/localization) are rewritten from `RestTemplate` to **injecting the target module's Spring service bean** (in-process). **Async** flows (persister, notifications) move to **Spring Modulith application events** later. Each module's **HTTP controllers stay** so Postman/external callers keep working unchanged. | The point of the modulith: delete the network hop for in-process calls while preserving the external API. Keeping controllers = "call idgen from Postman without interference" (your requirement). |
 | D6 | **`egov-user` + not-in-repo deps (HRMS, boundary, url-shortener)** keep `RestTemplate` over **port-forwarded** hosts. `egov-user` is explicitly **out of scope** for internalization (Spring Boot 1.5 / Java 8). | user = unportable without a full 1.5→3.2 / javax→jakarta migration; others = no source. Genuinely remote dependencies. |
@@ -116,9 +116,9 @@ in its own phase. The Spring Boot 3.x services are internalized first.
       Single entry point `org.egov.Application` (`@SpringBootApplication @Modulithic`,
       explicit `scanBasePackages`); single pom with `spring-modulith` BOM + starters and the
       Lombok 1.18.38 fix; `ModularityTests` running `ApplicationModules.verify()`.
-- [ ] **Phase 1 — idgen.** Bring `org.egov.id` into `application` (no repackage); drop its
-      `main()`; merge pom deps + properties + `db/migration/idgen`; rewrite PGR
-      `IdGenRepository` from HTTP to a direct `IdGenerationService` bean call.
+- [x] **Phase 1 — idgen.** Brought `org.egov.id` into `application` (no repackage); dropped its
+      `main()`; merged pom deps + properties + `db/migration/idgen`; rewrote PGR
+      `IdGenRepository` from HTTP to a direct `IdGenerationService` bean call. ✅ compiles + verify().
 - [ ] **Phase 2 — mdms-v2.** `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; merge; rewrite PGR `MDMSUtils`.
 - [ ] **Phase 3 — localization.** `org.egov.{config,web,...}`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`.
 - [ ] **Phase 4 — workflow.** `org.egov.wf` already clean; merge; rewrite PGR `WorkflowService`.
@@ -147,3 +147,53 @@ Each phase = its own change-log section in §6 and stays independently buildable
 - **Microservice vs Modulith:** Microservices enforce module boundaries with the network (one
   process each). The modulith keeps the boundaries (distinct module packages, in-process calls
   through service beans) but deletes the network, the N deployments, and the N configs.
+
+### [Phase 0] Foundation — `application/` host + single entry point + Modulith wiring
+- **What:**
+  - Seeded `application/` from `pgr-services` (the host). `pgr` code stays at `org.egov.pgr`.
+  - Replaced `org.egov.pgr.PGRApp` with a single root entry point `org.egov.Application`
+    (`@SpringBootApplication @Modulithic`, explicit `scanBasePackages` listing module packages,
+    same `@Import`/`ObjectMapper` bean as before).
+  - Added `spring-modulith-bom` (1.1.3) + `spring-modulith-starter-core`/`-test` to the one pom.
+  - Added `ModularityTests` running `ApplicationModules.verify()`, excluding the `org.egov.*`
+    library packages so only our modules are modelled.
+- **Result:** compiles on JDK 17; `verify()` passes; Modulith reports one module `Pgr`
+  (`org.egov.pgr`). The skeleton is ready to absorb modules one per phase.
+- **Why (first principles):** Establish the single deployable + the boundary-checker *before*
+  moving any service in, so every later phase is validated by `verify()` the moment it lands.
+- **Monolith vs Modulith:** A plain monolith would just have one `main()` and no boundary check —
+  nothing stops package tangling. `@Modulithic` + `verify()` is exactly the discipline that keeps
+  this from decaying into a big ball of mud as services are absorbed.
+
+### [Phase 1] idgen — first module absorbed and called in-process
+- **What:**
+  - Copied idgen sources `org.egov.id.*` into `application` unchanged (already a distinct package,
+    so no repackage). Left `PtIdGenerationApplication` behind (single `main()` rule).
+  - Copied idgen's `db/migration/*` to `db/migration/idgen` (D4 — per-module ownership).
+  - Added `json-path` + `json-smart` to the one pom (idgen's `MdmsService` needs `net.minidev`).
+  - Merged idgen's functional properties into the single `application.properties` (NOT its
+    datasource / server.port / context-path — the modulith has one of each).
+  - Declared `org.egov.id` a module (`package-info`), and published `org.egov.id.service` and
+    `org.egov.id.model` as `@NamedInterface`s — the Modulith 1.1.x way to expose specific
+    sub-packages across a boundary (no `type=OPEN` in 1.1.x).
+  - **Rewrote `pgr.IdGenRepository`**: removed `RestTemplate`/host config; injected
+    `IdGenerationService`; build idgen's request, call `generateIdResponse(...)` directly, and
+    map idgen's response back to PGR's own DTO with `ObjectMapper.convertValue` so `getId(...)`'s
+    signature — and `EnrichmentService` — are untouched.
+  - Activated `org.egov.id` in `Application`'s `scanBasePackages`.
+- **Result:** compiles on JDK 17; `verify()` passes with modules `Pgr` + `idgen`; the only
+  cross-module edge is `pgr → idgen` through idgen's named interfaces.
+- **Why (first principles):** A call between two bounded contexts is, fundamentally, "give me ids
+  for these formats." Microservices answer that with an HTTP round-trip (serialize → TCP →
+  deserialize → handle → reverse) purely because the contexts run in different processes. Once
+  they share a process, the honest implementation of the same call is a method invocation. We
+  delete the accidental complexity (network, JSON, timeouts, `ServiceCallException`) and keep the
+  essential one (the contract), translating DTOs at exactly one boundary.
+- **Microservice vs Monolith vs Modulith:**
+  - *Microservice:* `RestTemplate.postForObject(host+path, …)` — network boundary, independent
+    deploy, but latency + partial-failure handling on every id fetch.
+  - *Monolith:* `EnrichmentService` would just `new` or autowire idgen's service and reach into
+    any of its classes freely — fast, but no boundary; idgen could never be pulled back out.
+  - *Modulith (this):* direct bean call **through a published interface only**; `verify()` fails
+    the build if PGR touches idgen's internals. Fast like a monolith, bounded like a microservice,
+    and the named interface is the exact seam to re-extract idgen later.
