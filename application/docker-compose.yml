@@ -1,0 +1,71 @@
+# Local infra for runtime-booting the platform modulith.
+# Postgres + Redis + Kafka (KRaft, single node) + egov-persister.
+# The modulith runs on the HOST (java -jar) and connects to these on localhost.
+# persister stays a SEPARATE service (async via Kafka) — unchanged, per the plan.
+services:
+  postgres:
+    image: postgres:16
+    container_name: platform-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: platform
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: platform-redis
+    ports:
+      - "6379:6379"
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: platform-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # EXTERNAL for the host JVM (localhost:9092), INTERNAL for containers (kafka:29092).
+      KAFKA_LISTENERS: CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  persister:
+    image: egovio/egov-persister:master-3b238aa
+    container_name: platform-persister
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./persister-configs:/configs:ro
+    environment:
+      SERVER_PORT: 8080
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/platform
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      KAFKA_CONFIG_BOOTSTRAP_SERVER_CONFIG: kafka:29092
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_GROUP_ID: platform-persister
+      SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET: earliest
+      # Persister loads the PGR persist mapping (topic -> SQL). Multiple files can be
+      # comma-separated. This is the config that turns save-pgr-request* into INSERTs.
+      EGOV_PERSIST_YML_REPO_PATH: file:///configs/pgr-v2-persist-batch.yml

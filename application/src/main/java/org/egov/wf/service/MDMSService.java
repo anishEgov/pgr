@@ -33,8 +33,10 @@ import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 
 import com.jayway.jsonpath.JsonPath;
+import lombok.extern.slf4j.Slf4j;
 
 @Service
+@Slf4j
 public class MDMSService {
 
    private WorkflowConfig config;
@@ -66,15 +68,22 @@ public class MDMSService {
     public void stateLevelMapping(){
         Map<String, Boolean> stateLevelMapping = new HashMap<>();
 
-        Object mdmsData = getBusinessServiceMDMS();
-        List<HashMap<String, Object>> configs = JsonPath.read(mdmsData,JSONPATH_BUSINESSSERVICE_STATELEVEL);
+        // [modulith] This eager startup load used to hit the standalone MDMS service over HTTP.
+        // In the modulith MDMS is in-process and the DB may not yet hold the business-service
+        // config, so a failure here must not abort the whole application context — degrade to an
+        // empty mapping and let it be (re)built lazily/when data exists.
+        try {
+            Object mdmsData = getBusinessServiceMDMS();
+            List<HashMap<String, Object>> configs = JsonPath.read(mdmsData, JSONPATH_BUSINESSSERVICE_STATELEVEL);
 
-        for (Map map : configs){
-
-            String businessService = (String) map.get("businessService");
-            Boolean isStatelevel = Boolean.valueOf((String) map.get("isStatelevel"));
-
-            stateLevelMapping.put(businessService, isStatelevel);
+            for (Map map : configs) {
+                String businessService = (String) map.get("businessService");
+                Boolean isStatelevel = Boolean.valueOf((String) map.get("isStatelevel"));
+                stateLevelMapping.put(businessService, isStatelevel);
+            }
+        } catch (Exception e) {
+            log.warn("Could not load workflow state-level businessService mapping at startup " +
+                    "(MDMS data may not be seeded yet); defaulting to empty. Cause: {}", e.getMessage());
         }
 
         this.stateLevelMapping = stateLevelMapping;

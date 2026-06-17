@@ -451,3 +451,95 @@ cd application
 JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 mvn -o test -Dtest=ModularityTests   # boundaries
 JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 mvn -o clean package                 # one fat jar
 ```
+
+---
+
+## 8. Phase R — Runtime boot (docker-compose infra)
+
+Goal: actually start the modulith (`java -jar`) against real infra and fix whatever the merge
+broke at *context-startup* time (compile + `verify()` can't catch bean-wiring / eager-init issues).
+Per the plan, **persister stays a separate service consuming Kafka** (async, unchanged) — it is NOT
+absorbed; it runs as its own container.
+
+### [R.0] Infra via docker-compose
+- **Files added:**
+  - `application/docker-compose.yml` — `postgres:16` (host port **5433**, db `platform`),
+    `redis:7` (6379), `apache/kafka:3.7.0` (KRaft single node; EXTERNAL `localhost:9092` for the
+    host JVM, INTERNAL `kafka:29092` for containers), and `egovio/egov-persister` (consumes Kafka
+    `kafka:29092`, writes to the same Postgres).
+  - `application/persister-configs/pgr-v2-persist-batch.yml` — the topic→SQL mapping the persister
+    container loads (`EGOV_PERSIST_YML_REPO_PATH`).
+- **Why:** the modulith needs a real Postgres (one shared datasource, D4), Redis (localization
+  cache), and Kafka (PGR producer → persister). persister stays external so the async write path is
+  unchanged — exactly the "go with Kafka only for persistence" decision.
+
+### [R.1] `application.properties` — runtime wiring (every changed line)
+```properties
+# datasource now points at the compose Postgres (was localhost:15432/pgr)
+spring.datasource.url=jdbc:postgresql://localhost:5433/platform
+# disable Spring Boot auto-Flyway for first boot (flyway-core is on the classpath via several
+# modules; default would scan classpath:db/migration/** and run ALL modules' migrations, whose
+# versions can clash). Schema handled separately.
+spring.flyway.enabled=false
+flyway.url=jdbc:postgresql://localhost:5433/platform     # (legacy non-spring keys, kept aligned)
+# Kafka broker exposed by compose
+spring.kafka.bootstrap-servers=localhost:9092
+# allow bean-definition overriding — see [R.3]
+spring.main.allow-bean-definition-overriding=true
+```
+
+### [R.2] Boot error #1 — duplicate `@Bean` method names across modules
+- **Symptom:**
+  ```
+  The bean 'jacksonConverter', defined in class path resource [org/egov/wf/config/WorkflowConfig.class],
+  could not be registered. A bean with that name has already been defined in class path resource
+  [org/egov/pgr/config/PGRConfiguration.class] and overriding is disabled.
+  ```
+- **Cause (first principles):** the `FullyQualifiedAnnotationBeanNameGenerator` from Phase 4 only
+  renames **component-scanned** beans (`@Component/@Service/...`). `@Bean` *methods* take their name
+  from the method, so identical infra factory methods across modules — `jacksonConverter`,
+  `objectMapper`, `restTemplate`, kafka templates — collide in one context. Each former service
+  shipped its own copy of these infra beans; one container can only hold one of each name.
+- **Fix:** `spring.main.allow-bean-definition-overriding=true` (last definition wins). These infra
+  beans are equivalent across modules, so overriding is safe for boot. *Follow-up (cleaner):* delete
+  the duplicate infra `@Bean`s and keep one shared definition.
+
+### [R.3] Boot error #2 — workflow's eager MDMS load crashes the context
+- **Symptom:** bean creation chain `…NotificationConsumer → NotificationService → pgr.WorkflowService
+  → wf.WorkflowService → wf.TransitionService → wf.BusinessServiceRepositoryV1 → wf.MDMSService`,
+  failing with:
+  ```
+  Caused by: org.springframework.beans.factory.BeanCreationException: Error creating bean with name
+  'org.egov.wf.service.MDMSService': Invocation of init method failed
+  Caused by: java.lang.IllegalArgumentException: json object can not be null
+  ```
+- **Cause:** `wf.MDMSService` has a `@PostConstruct stateLevelMapping()` that **eagerly** fetches
+  business-service config from MDMS and `JsonPath.read`s it. As microservices, MDMS was a live HTTP
+  endpoint at boot. In the modulith MDMS is in-process and the shared DB has no MDMS data yet, so the
+  call returns null and the whole context aborts. A single service's optional startup cache should
+  not be able to kill the entire application.
+- **Fix (`org/egov/wf/service/MDMSService.java`):** wrap the eager load in try/catch, default to an
+  empty mapping, and log a warning; added `@Slf4j` for the logger.
+  ```java
+  @PostConstruct
+  public void stateLevelMapping(){
+      Map<String, Boolean> stateLevelMapping = new HashMap<>();
+      try {
+          Object mdmsData = getBusinessServiceMDMS();
+          List<HashMap<String,Object>> configs = JsonPath.read(mdmsData, JSONPATH_BUSINESSSERVICE_STATELEVEL);
+          for (Map map : configs) {
+              stateLevelMapping.put((String) map.get("businessService"),
+                                    Boolean.valueOf((String) map.get("isStatelevel")));
+          }
+      } catch (Exception e) {
+          log.warn("Could not load wf state-level businessService mapping at startup " +
+                   "(MDMS data may not be seeded yet); defaulting to empty. Cause: {}", e.getMessage());
+      }
+      this.stateLevelMapping = stateLevelMapping;
+  }
+  ```
+- **Note:** this only makes startup resilient. wf's *request-time* MDMS calls still go over HTTP to
+  `egov.mdms.host`; wiring wf→mdms fully in-process (like pgr) + seeding MDMS data is a follow-up.
+
+### [R.4] Boot error #3 — `java.net.ConnectException: Connection refused` (in progress)
+- Investigating which eager client (Kafka admin / a `@PostConstruct` HTTP call / DB) is refused.
