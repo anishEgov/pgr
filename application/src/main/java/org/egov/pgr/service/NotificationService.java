@@ -610,17 +610,9 @@ public class NotificationService {
 
         requestInfo.setUserInfo(userInfo);
 
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
-        StringBuilder URL = workflowService.getprocessInstanceSearchURL(tenantId,serviceRequestId);
-        URL.append("&").append("history=true");
-
-        Object result = serviceRequestRepository.fetchResult(URL, requestInfoWrapper);
-        ProcessInstanceResponse processInstanceResponse = null;
-        try {
-            processInstanceResponse = mapper.convertValue(result, ProcessInstanceResponse.class);
-        } catch (IllegalArgumentException e) {
-            throw new CustomException("PARSING ERROR", "Failed to parse response of workflow processInstance search");
-        }
+        // [Phase 4] was: HTTP POST wf/process/_search?...&history=true -> now in-process
+        ProcessInstanceResponse processInstanceResponse =
+                workflowService.searchProcessInstance(requestInfo, tenantId, serviceRequestId, true);
         if (CollectionUtils.isEmpty(processInstanceResponse.getProcessInstances()))
             throw new CustomException("WORKFLOW_NOT_FOUND", "The workflow object is not found");
 

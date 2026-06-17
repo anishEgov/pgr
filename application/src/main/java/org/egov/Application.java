@@ -10,6 +10,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FullyQualifiedAnnotationBeanNameGenerator;
 import org.springframework.context.annotation.Import;
 import org.springframework.modulith.Modulithic;
 
@@ -35,12 +36,19 @@ import java.util.TimeZone;
  */
 @SpringBootApplication
 @Modulithic(systemName = "eGov Platform Modulith")
-@ComponentScan(basePackages = {
+@ComponentScan(
+        // Several modules ship beans with the SAME simple class name (e.g. WorkflowService,
+        // UserService, EnrichmentService, MDMSService exist in pgr/wf/mdmsv2). The default bean
+        // namer would register them all as e.g. "workflowService" and the context would fail with
+        // a ConflictingBeanDefinitionException. Fully-qualified names (package + class) make each
+        // bean unique — the standard fix when one app hosts modules that were separate services.
+        nameGenerator = FullyQualifiedAnnotationBeanNameGenerator.class,
+        basePackages = {
         "org.egov.pgr",
         "org.egov.id",              // Phase 1 — idgen (wired: pgr calls IdGenerationService in-process)
         "org.egov.mdmsv2",          // Phase 2 — mdms (wired: pgr calls MDMSService in-process)
-        "org.egov.localization"     // Phase 3 — localization (wired: pgr calls MessageService in-process)
-        // , "org.egov.wf"          // Phase 4 — workflow
+        "org.egov.localization",    // Phase 3 — localization (wired: pgr calls MessageService in-process)
+        "org.egov.wf"               // Phase 4 — workflow (wired: pgr calls wf WorkflowService in-process)
         // , "org.egov.persist"     // Phase 5 — persister
 })
 @Import({TracerConfiguration.class, MultiStateInstanceUtil.class})

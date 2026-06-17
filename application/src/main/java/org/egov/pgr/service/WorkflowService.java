@@ -1,14 +1,13 @@
 package org.egov.pgr.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.lang3.StringUtils;
 import org.egov.common.contract.request.RequestInfo;
 import org.egov.common.contract.request.User;
-import org.egov.pgr.config.PGRConfiguration;
-import org.egov.pgr.repository.ServiceRequestRepository;
 import org.egov.pgr.web.models.*;
 import org.egov.pgr.web.models.workflow.*;
 import org.egov.tracer.model.CustomException;
+import org.egov.wf.service.V1.BusinessMasterServiceV1;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.CollectionUtils;
 
@@ -17,21 +16,36 @@ import java.util.stream.Collectors;
 
 import static org.egov.pgr.util.PGRConstants.*;
 
+/**
+ * Adapter from the {@code pgr} module to the {@code workflow} (org.egov.wf) module.
+ *
+ * <p><b>Modulith change (Phase 4, D5):</b> the three HTTP calls PGR used to make to the workflow
+ * service — businessservice search, process {@code _transition}, process {@code _search} — are now
+ * direct in-process calls to the workflow module's beans ({@link BusinessMasterServiceV1} and the
+ * workflow {@code WorkflowService}). PGR keeps its own workflow DTOs; we translate to/from the
+ * module's DTOs at each call with {@link ObjectMapper}. Both sides reuse the same
+ * {@code org.egov.common.contract} {@code RequestInfo}, so only the workflow-specific models map.
+ *
+ * <p>The class name {@code WorkflowService} exists in both modules; they no longer collide because
+ * the app uses a fully-qualified bean-name generator. We reference the workflow one by FQN.
+ */
 @org.springframework.stereotype.Service
 public class WorkflowService {
 
-    private PGRConfiguration pgrConfiguration;
+    private final ObjectMapper mapper;
 
-    private ServiceRequestRepository repository;
+    // workflow module beans (FQN: the workflow module also has a class named WorkflowService)
+    private final org.egov.wf.service.WorkflowService wfWorkflowService;
 
-    private ObjectMapper mapper;
-
+    private final BusinessMasterServiceV1 businessMasterServiceV1;
 
     @Autowired
-    public WorkflowService(PGRConfiguration pgrConfiguration, ServiceRequestRepository repository, ObjectMapper mapper) {
-        this.pgrConfiguration = pgrConfiguration;
-        this.repository = repository;
+    public WorkflowService(ObjectMapper mapper,
+                           org.egov.wf.service.WorkflowService wfWorkflowService,
+                           BusinessMasterServiceV1 businessMasterServiceV1) {
         this.mapper = mapper;
+        this.wfWorkflowService = wfWorkflowService;
+        this.businessMasterServiceV1 = businessMasterServiceV1;
     }
 
     /*
@@ -41,20 +55,20 @@ public class WorkflowService {
      * */
     public BusinessService getBusinessService(ServiceRequest serviceRequest) {
         String tenantId = serviceRequest.getService().getTenantId();
-        StringBuilder url = getSearchURLWithParams(tenantId, PGR_BUSINESSSERVICE);
-        RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(serviceRequest.getRequestInfo()).build();
-        Object result = repository.fetchResult(url, requestInfoWrapper);
-        BusinessServiceResponse response = null;
-        try {
-            response = mapper.convertValue(result, BusinessServiceResponse.class);
-        } catch (IllegalArgumentException e) {
-            throw new CustomException("PARSING ERROR", "Failed to parse response of workflow business service search");
-        }
+        // was: HTTP GET wf/businessservice/_search?tenantId=..&businessServices=..
+        org.egov.wf.web.models.BusinessServiceSearchCriteria criteria =
+                new org.egov.wf.web.models.BusinessServiceSearchCriteria();
+        criteria.setTenantId(tenantId);
+        criteria.setBusinessServices(Collections.singletonList(PGR_BUSINESSSERVICE));
 
-        if (CollectionUtils.isEmpty(response.getBusinessServices()))
+        List<org.egov.wf.web.models.BusinessService> wfBusinessServices = businessMasterServiceV1.search(criteria);
+        List<BusinessService> businessServices =
+                mapper.convertValue(wfBusinessServices, new TypeReference<List<BusinessService>>() {});
+
+        if (CollectionUtils.isEmpty(businessServices))
             throw new CustomException("BUSINESSSERVICE_NOT_FOUND", "The businessService " + PGR_BUSINESSSERVICE + " is not found");
 
-        return response.getBusinessServices().get(0);
+        return businessServices.get(0);
     }
 
 
@@ -80,24 +94,6 @@ public class WorkflowService {
          *
          * */
 
-    }
-
-    /**
-     * Creates url for search based on given tenantId and businessservices
-     *
-     * @param tenantId        The tenantId for which url is generated
-     * @param businessService The businessService for which url is generated
-     * @return The search url
-     */
-    private StringBuilder getSearchURLWithParams(String tenantId, String businessService) {
-
-        StringBuilder url = new StringBuilder(pgrConfiguration.getWfHost());
-        url.append(pgrConfiguration.getWfBusinessServiceSearchPath());
-        url.append("?tenantId=");
-        url.append(tenantId);
-        url.append("&businessServices=");
-        url.append(businessService);
-        return url;
     }
 
 
@@ -126,15 +122,20 @@ public class WorkflowService {
                 serviceRequestIds.add(pgrEntity.getService().getServiceRequestId());
             });
 
-            RequestInfoWrapper requestInfoWrapper = RequestInfoWrapper.builder().requestInfo(requestInfo).build();
+            // was: HTTP POST wf/process/_search?tenantId=..&businessIds=..  -> now in-process
+            org.egov.wf.web.models.ProcessInstanceSearchCriteria criteria =
+                    new org.egov.wf.web.models.ProcessInstanceSearchCriteria();
+            criteria.setTenantId(tenantId);
+            criteria.setBusinessIds(serviceRequestIds);
 
-            StringBuilder searchUrl = getprocessInstanceSearchURL(tenantId, StringUtils.join(serviceRequestIds, ','));
-            Object result = repository.fetchResult(searchUrl, requestInfoWrapper);
+            List<org.egov.wf.web.models.ProcessInstance> wfProcessInstances =
+                    wfWorkflowService.search(requestInfo, criteria);
 
-
-            ProcessInstanceResponse processInstanceResponse = null;
+            ProcessInstanceResponse processInstanceResponse;
             try {
-                processInstanceResponse = mapper.convertValue(result, ProcessInstanceResponse.class);
+                List<ProcessInstance> processInstances =
+                        mapper.convertValue(wfProcessInstances, new TypeReference<List<ProcessInstance>>() {});
+                processInstanceResponse = ProcessInstanceResponse.builder().processInstances(processInstances).build();
             } catch (IllegalArgumentException e) {
                 throw new CustomException("PARSING ERROR", "Failed to parse response of workflow processInstance search");
             }
@@ -232,32 +233,36 @@ public class WorkflowService {
     }
 
     /**
-     * Method to integrate with workflow
-     * <p>
-     * take the ProcessInstanceRequest as paramerter to call wf-service
-     * <p>
-     * and return wf-response to sets the resultant status
+     * In-process process-instance search (replaces the former HTTP {@code /process/_search}).
+     * Used by NotificationService (with history=true) to read the workflow timeline of a complaint.
      */
-    private ProcessInstanceResponse callWorkFlow(ProcessInstanceRequest workflowReq) {
-
-        ProcessInstanceResponse response = null;
-        StringBuilder url = new StringBuilder(pgrConfiguration.getWfHost().concat(pgrConfiguration.getWfTransitionPath()));
-        Object optional = repository.fetchResult(url, workflowReq);
-        response = mapper.convertValue(optional, ProcessInstanceResponse.class);
-        return response;
+    public ProcessInstanceResponse searchProcessInstance(RequestInfo requestInfo, String tenantId,
+                                                         String serviceRequestId, boolean history) {
+        org.egov.wf.web.models.ProcessInstanceSearchCriteria criteria =
+                new org.egov.wf.web.models.ProcessInstanceSearchCriteria();
+        criteria.setTenantId(tenantId);
+        criteria.setBusinessIds(Collections.singletonList(serviceRequestId));
+        criteria.setHistory(history);
+        List<org.egov.wf.web.models.ProcessInstance> wfProcessInstances =
+                wfWorkflowService.search(requestInfo, criteria);
+        List<ProcessInstance> processInstances =
+                mapper.convertValue(wfProcessInstances, new TypeReference<List<ProcessInstance>>() {});
+        return ProcessInstanceResponse.builder().processInstances(processInstances).build();
     }
 
-
-    public StringBuilder getprocessInstanceSearchURL(String tenantId, String serviceRequestId) {
-
-        StringBuilder url = new StringBuilder(pgrConfiguration.getWfHost());
-        url.append(pgrConfiguration.getWfProcessInstanceSearchPath());
-        url.append("?tenantId=");
-        url.append(tenantId);
-        url.append("&businessIds=");
-        url.append(serviceRequestId);
-        return url;
-
+    /**
+     * Method to integrate with workflow
+     * <p>
+     * takes the ProcessInstanceRequest, maps it to the workflow module's request, calls the
+     * workflow module's transition() in-process and maps the result back to PGR's response.
+     */
+    private ProcessInstanceResponse callWorkFlow(ProcessInstanceRequest workflowReq) {
+        org.egov.wf.web.models.ProcessInstanceRequest wfRequest =
+                mapper.convertValue(workflowReq, org.egov.wf.web.models.ProcessInstanceRequest.class);
+        List<org.egov.wf.web.models.ProcessInstance> wfProcessInstances = wfWorkflowService.transition(wfRequest);
+        List<ProcessInstance> processInstances =
+                mapper.convertValue(wfProcessInstances, new TypeReference<List<ProcessInstance>>() {});
+        return ProcessInstanceResponse.builder().processInstances(processInstances).build();
     }
 
 

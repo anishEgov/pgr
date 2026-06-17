@@ -121,7 +121,7 @@ in its own phase. The Spring Boot 3.x services are internalized first.
       `IdGenRepository` from HTTP to a direct `IdGenerationService` bean call. ✅ compiles + verify().
 - [x] **Phase 2 — mdms-v2.** `org.egov.infra.mdms.*`→`org.egov.mdmsv2.*`; merge; rewrite PGR `MDMSUtils`. ✅ compiles + verify().
 - [x] **Phase 3 — localization.** `org.egov.{config,web,...}`→`org.egov.localization.*`; rewrite PGR `NotificationUtil`. ✅ compiles + verify().
-- [ ] **Phase 4 — workflow.** `org.egov.wf` already clean; merge; rewrite PGR `WorkflowService`.
+- [x] **Phase 4 — workflow.** `org.egov.wf` already clean; merge; rewrite PGR `WorkflowService`. ✅ compiles + verify().
 - [ ] **Phase 5 — persister.** `org.egov.infra.persist.*`→`org.egov.persist.*`; wire kafka in the one app.
 - [ ] **Phase 6 — events.** Convert async paths (persister, notifications) to Spring Modulith events.
 - [ ] **egov-user — OUT OF SCOPE.** Stays an HTTP/port-forward dependency (Spring Boot 1.5 / Java 8).
@@ -353,3 +353,69 @@ Each phase = its own change-log section in §6 and stays independently buildable
   - *Monolith:* PGR would query the message JPA repo / cache directly — no boundary.
   - *Modulith (this):* PGR depends only on localization's `service`/`model`/`contract` named
     interfaces, via constructor injection that `verify()` insists on — coupling stays explicit.
+
+### [Phase 4] workflow — absorbed; the biggest integration goes in-process
+- **Files added / changed:**
+  - `org/egov/wf/**` (56 files) — copied unchanged (already `org.egov.wf`, no repackage). `Main`
+    (the `main()`) dropped.
+  - `db/migration/workflow/**` (D4).
+  - `org/egov/wf/package-info.java` + named interfaces `service`, `service/V1` (`service-v1`),
+    `web/models` (`models`).
+  - `Application.java` — added `org.egov.wf` to scan **and** set
+    `nameGenerator = FullyQualifiedAnnotationBeanNameGenerator.class` (see build errors).
+  - `application.properties` — workflow-unique keys (kafka consumer, wf topics, `egov.wf.*`, …).
+  - `pgr/service/WorkflowService.java` — three HTTP calls → in-process (below).
+  - `pgr/service/NotificationService.java` — its hidden `/process/_search?...&history=true` HTTP
+    call → in-process via a new `WorkflowService.searchProcessInstance(...)`.
+- **Build errors hit & fixed (in order):**
+  1. *(anticipated, fixed pre-emptively)* **bean-name collisions.** Four simple class names exist in
+     more than one module — `WorkflowService` (pgr+wf), `UserService` (pgr+wf), `EnrichmentService`
+     (pgr+wf), `MDMSService` (mdmsv2+wf). Spring's default namer would register e.g. two
+     `workflowService` beans → `ConflictingBeanDefinitionException` at startup. **Fix:**
+     `@ComponentScan(nameGenerator = FullyQualifiedAnnotationBeanNameGenerator.class)` so bean names
+     are package-qualified. (Verified no `@Qualifier`/`getBean(name)` in pgr that would break.)
+  2. `cannot find symbol method getprocessInstanceSearchURL` in `NotificationService` — I had deleted
+     that URL-builder from `WorkflowService`, not realizing `NotificationService.getEmployeeName`
+     also used it for a *second* workflow search (with `history=true`). **Fix:** add a proper
+     in-process `searchProcessInstance(requestInfo, tenantId, serviceRequestId, history)` to the
+     adapter and call it from `NotificationService`.
+- **Code — transition call (`pgr/service/WorkflowService.java`):**
+
+  ```java
+  // ── BEFORE (microservice) ─────────────────────────────────────────────────────
+  private ProcessInstanceResponse callWorkFlow(ProcessInstanceRequest workflowReq) {
+      StringBuilder url = new StringBuilder(cfg.getWfHost().concat(cfg.getWfTransitionPath()));
+      Object optional = repository.fetchResult(url, workflowReq);                 // HTTP POST
+      return mapper.convertValue(optional, ProcessInstanceResponse.class);
+  }
+  ```
+  ```java
+  // ── AFTER (modulith): call the wf module's transition() directly ───────────────
+  private ProcessInstanceResponse callWorkFlow(ProcessInstanceRequest workflowReq) {
+      org.egov.wf.web.models.ProcessInstanceRequest wfRequest =
+              mapper.convertValue(workflowReq, org.egov.wf.web.models.ProcessInstanceRequest.class);
+      List<org.egov.wf.web.models.ProcessInstance> wf = wfWorkflowService.transition(wfRequest);
+      return ProcessInstanceResponse.builder()
+              .processInstances(mapper.convertValue(wf, new TypeReference<List<ProcessInstance>>(){}))
+              .build();
+  }
+  ```
+- **Code — the bean-name generator (`Application.java`):**
+
+  ```java
+  @ComponentScan(
+      nameGenerator = FullyQualifiedAnnotationBeanNameGenerator.class,  // unique names per module
+      basePackages = { "org.egov.pgr", "org.egov.id", "org.egov.mdmsv2", "org.egov.localization", "org.egov.wf" })
+  ```
+- **Why (first principles):** workflow is PGR's hottest dependency — every create and update does a
+  transition, every search enriches with workflow state, notifications read the workflow history.
+  As microservices that's *several* network hops per request; in one process they're method calls
+  in the same transaction. The bean-name collision is the flip side of collapsing services: names
+  that were globally unique *per process* now share one container, so we make them unique again.
+- **Microservice vs Monolith vs Modulith:**
+  - *Microservice:* N HTTP hops/request; workflow independently scaled/deployed; resilience code
+    (timeouts/retries) on every call.
+  - *Monolith:* PGR would call workflow's `TransitionService`/repos directly — no boundary, and the
+    two `WorkflowService` classes would just be an ugly name clash to "solve" by renaming domain code.
+  - *Modulith (this):* PGR depends only on workflow's `service`/`service-v1`/`models` named
+    interfaces; the clash is solved by infrastructure (bean namer), not by touching domain code.
