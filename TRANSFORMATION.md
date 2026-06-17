@@ -183,6 +183,42 @@ Each phase = its own change-log section in §6 and stays independently buildable
   - Activated `org.egov.id` in `Application`'s `scanBasePackages`.
 - **Result:** compiles on JDK 17; `verify()` passes with modules `Pgr` + `idgen`; the only
   cross-module edge is `pgr → idgen` through idgen's named interfaces.
+- **Code — the call boundary (`pgr/repository/IdGenRepository.java`):**
+
+  ```java
+  // ── BEFORE (microservice): HTTP round-trip to the idgen service ───────────────
+  private RestTemplate restTemplate;
+  private PGRConfiguration config;                       // holds egov.idgen.host / .path
+
+  public IdGenerationResponse getId(RequestInfo ri, String tenantId,
+                                    String name, String format, int count) {
+      IdGenerationRequest req = IdGenerationRequest.builder()...build();   // PGR's own DTO
+      // serialize → TCP → idgen process → deserialize → ... → back
+      return restTemplate.postForObject(
+                 config.getIdGenHost() + config.getIdGenPath(), req,
+                 IdGenerationResponse.class);            // PGR's own DTO
+  }
+  ```
+  ```java
+  // ── AFTER (modulith): direct in-process call through idgen's @NamedInterface ──
+  private final IdGenerationService idGenerationService; // org.egov.id.service (published)
+  private final ObjectMapper mapper;
+
+  public IdGenerationResponse getId(RequestInfo ri, String tenantId,
+                                    String name, String format, int count) {
+      org.egov.id.model.IdGenerationRequest req = new org.egov.id.model.IdGenerationRequest();
+      req.setRequestInfo(mapper.convertValue(ri, org.egov.id.model.RequestInfo.class)); // map at the seam
+      req.setIdRequests(reqList);
+      org.egov.id.model.IdGenerationResponse resp = idGenerationService.generateIdResponse(req);
+      return mapper.convertValue(resp, IdGenerationResponse.class);   // back to PGR's DTO
+  }
+  ```
+- **Code — exposing only what crosses the boundary (`id/service/package-info.java`):**
+
+  ```java
+  @org.springframework.modulith.NamedInterface("service")   // IdGenerationService becomes public API
+  package org.egov.id.service;                               // everything else in idgen stays internal
+  ```
 - **Why (first principles):** A call between two bounded contexts is, fundamentally, "give me ids
   for these formats." Microservices answer that with an HTTP round-trip (serialize → TCP →
   deserialize → handle → reverse) purely because the contexts run in different processes. Once
