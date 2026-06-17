@@ -48,7 +48,10 @@ import java.util.TimeZone;
         "org.egov.id",              // Phase 1 — idgen (wired: pgr calls IdGenerationService in-process)
         "org.egov.mdmsv2",          // Phase 2 — mdms (wired: pgr calls MDMSService in-process)
         "org.egov.localization",    // Phase 3 — localization (wired: pgr calls MessageService in-process)
-        "org.egov.wf"               // Phase 4 — workflow (wired: pgr calls wf WorkflowService in-process)
+        "org.egov.wf",              // Phase 4 — workflow (wired: pgr calls wf WorkflowService in-process)
+        "org.egov.mdms.service"     // mdms-client library bean (MdmsClientService @Service) that
+                                    // idgen's MdmsService autowires; the standalone idgen registered
+                                    // it via a broad org.egov scan — we add just this one lib package.
         // , "org.egov.persist"     // Phase 5 — persister
 })
 @Import({TracerConfiguration.class, MultiStateInstanceUtil.class})

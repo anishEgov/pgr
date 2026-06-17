@@ -4,16 +4,22 @@ import java.util.TimeZone;
 
 
 import jakarta.annotation.PostConstruct;
+import org.cache2k.extra.spring.SpringCache2kCacheManager;
 import org.egov.common.utils.MultiStateInstanceUtil;
 import org.egov.tracer.config.TracerConfiguration;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.stereotype.Component;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.concurrent.TimeUnit;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -24,6 +30,7 @@ import lombok.Setter;
 
 
 @Import({TracerConfiguration.class, MultiStateInstanceUtil.class})
+@EnableCaching
 @Getter
 @Setter
 @AllArgsConstructor
@@ -37,9 +44,23 @@ public class WorkflowConfig {
     @Value("${app.timezone}")
     private String timeZone;
 
+    @Value("${cache.expiry.workflow.minutes}")
+    private int workflowExpiry;
+
     @PostConstruct
     public void initialize() {
         TimeZone.setDefault(TimeZone.getTimeZone(timeZone));
+    }
+
+    // [Phase R] Re-homed verbatim from workflow's dropped Main entry point (which carried
+    // @EnableCaching + this bean). Required by workflow's @Cacheable("businessService" /
+    // "roleTenantAndStatusesMapping") methods; the merged context had no CacheManager otherwise.
+    @Bean
+    @Profile("!test")
+    public CacheManager cacheManager() {
+        return new SpringCache2kCacheManager()
+                .addCaches(b -> b.name("businessService").expireAfterWrite(workflowExpiry, TimeUnit.MINUTES).entryCapacity(10))
+                .addCaches(b -> b.name("roleTenantAndStatusesMapping").expireAfterWrite(workflowExpiry, TimeUnit.MINUTES).entryCapacity(10));
     }
 
     @Bean

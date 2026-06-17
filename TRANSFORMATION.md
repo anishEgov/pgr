@@ -543,3 +543,53 @@ spring.main.allow-bean-definition-overriding=true
 
 ### [R.4] Boot error #3 — `java.net.ConnectException: Connection refused` (in progress)
 - Investigating which eager client (Kafka admin / a `@PostConstruct` HTTP call / DB) is refused.
+
+### [R.4 resolved] Boot error #3 — workflow needs a CacheManager bean
+- **Symptom:** `BusinessMasterService` ctor param 5: `No qualifying bean of type
+  'org.springframework.cache.CacheManager' available`. workflow's `@Cacheable("businessService",
+  "roleTenantAndStatusesMapping")` methods need a CacheManager.
+- **Cause:** workflow declared `@EnableCaching` + its cache2k `CacheManager` bean **on its `Main`
+  class** — the `@SpringBootApplication` entry point we had to drop (one app, one entry point).
+- **Fix (minimal, re-home not re-write):** moved that exact wiring onto workflow's **existing**
+  `WorkflowConfig` (`@EnableCaching` + the same `cacheManager()` bean, reusing the existing
+  `cache.expiry.workflow.minutes` property) instead of creating a new class; added the
+  `cache2k-spring:2.6.1.Final` dependency workflow already declared.
+
+### [R.5 resolved] Boot error #4 — idgen needs the mdms-client `MdmsClientService` bean
+- **Symptom:** `org.egov.id.service.MdmsService` field `mdmsClientService`: `No qualifying bean of
+  type 'org.egov.mdms.service.MdmsClientService'`.
+- **Cause:** that bean is a `@Service` in the **mdms-client library** (`org.egov.mdms.service`).
+  Standalone idgen registered it via a broad `org.egov` component-scan; our explicit scan list
+  didn't include the library package.
+- **Fix (minimal):** add the single library package `org.egov.mdms.service` to `scanBasePackages`
+  (reuses the existing library bean — no new code).
+
+### [R.6] ✅ Boot success + multi-module smoke test
+```
+Tomcat started on port 8280 (http) with context path '/pgr-services'
+Started Application in 9.495 seconds
+```
+- 5 modules wired in one process; 3 Kafka consumers subscribed; connected to compose
+  Postgres/Redis/Kafka. The one ERROR in the log is workflow's startup MDMS probe (Connection
+  refused) — caught by the tolerant `@PostConstruct` (R.3), non-fatal.
+- **Every module's HTTP API responds (single process, single port):**
+
+  | call | route | result |
+  |---|---|---|
+  | idgen | `POST /pgr-services/egov-idgen/id/_generate` | **200** |
+  | mdms | `POST /pgr-services/v1/_search` | **200** |
+  | workflow | `POST /pgr-services/egov-wf/businessservice/_search` | **200** |
+  | pgr | `POST /pgr-services/v1/_create` | **200** |
+
+- **Note — context path:** the single app has one context path (`/pgr-services`), so each absorbed
+  module's endpoints now live *under* it (e.g. idgen at `/pgr-services/egov-idgen/...`, not
+  `/egov-idgen/...`). The paths are otherwise unchanged, so "call idgen from Postman" works — just
+  with the `/pgr-services` prefix. (If bare prefixes are required, drop the global context path and
+  let each controller carry its full path — a follow-up.)
+
+### Runtime — what is and isn't validated
+- ✅ Single app **boots**, all 5 modules' beans wire, all modules' controllers route (HTTP 200).
+- ✅ In-process cross-module calls compile + wire (pgr → idgen/mdms/localization/workflow).
+- ⏳ **Data-dependent behavior** (real complaint create→workflow→persist) needs DB **schema seeded**
+  (Flyway is disabled; tables not yet created) and the **persister** container consuming
+  `save-pgr-request*`. Booting persister + seeding schema is the next step for a true end-to-end test.
