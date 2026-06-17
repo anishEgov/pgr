@@ -633,3 +633,41 @@ Started Application in 9.495 seconds
   modules are decoupled, not nested under pgr.
 - **Note on HTTP codes:** the eGov tracer wraps all responses (even 404s) as HTTP 200 with a status
   body, so correctness is judged by the **body**, not the status code.
+
+### [R.8] persister runs as a SEPARATE service (multi-module), not in compose
+- **Feedback that drove this:** a single persister container hardcodes one
+  `EGOV_PERSIST_YML_REPO_PATH` → it can only persist ONE module. But persistence is cross-module
+  (a PGR complaint creates BOTH a pgr record AND workflow transitions). So persister must load
+  **multiple** persist configs at once.
+- **Changes:**
+  1. **Removed** the `persister` service from `application/docker-compose.yml` (and deleted the
+     `persister-configs/` dir it used). Compose now provides only postgres + redis + kafka.
+  2. **Run the real `egov-persister` service** (from the `egov-persister/` source folder) in
+     parallel with the modulith, pointed at the **shared platform DB** and at **one folder** that
+     holds every module's persist config:
+     ```properties
+     spring.datasource.driver-class-name=org.postgresql.Driver
+     spring.datasource.url=jdbc:postgresql://localhost:5433/platform
+     egov.persist.yml.repo.path=file://…/egov-persister/src/main/resources/persister-configs
+     ```
+  3. **Consolidated the persist YAMLs into one place** —
+     `egov-persister/src/main/resources/persister-configs/` — holding `pgr-v2-persist-batch.yml`
+     (moved out of the modulith, which never used it) and `egov-workflow-v2-persister.yml`. Adding
+     a module's persistence is now just dropping its `*.yml` in this folder.
+- **How auto-pick-by-topic actually works (clarification):** the persister does NOT scan Kafka to
+  find configs. At startup it loads every `*.yml` under `repo.path`
+  (`EgovPersistApplication.getFilesInFolder`), reads each file's `fromTopic`, and subscribes to
+  exactly those topics. So routing is driven by each config's `fromTopic` — you point `repo.path`
+  at the folder once; you don't list files. (A dedicated subfolder is used, not the resources root,
+  because the loader parses *every* `.yml` it finds with no exclusions — the root's `application.yml`
+  and unrelated sample configs would otherwise be (mis)parsed as persister configs.)
+- **Topic wiring:** workflow's config consumes `save-wf-transitions` / `save-wf-businessservice` /
+  `update-wf-businessservice` — exactly what the modulith publishes. *Caveat:* the only pgr config
+  in the repo (`pgr-v2-persist-batch.yml`) consumes the **`-batch`** topics, while the modulith's
+  normal create publishes `save-pgr-request`; the batch config matches the migration path, so a
+  non-batch pgr persister config (consuming `save-pgr-request`) may be needed for the live create
+  flow.
+- **Why (architecture):** this keeps the async write path **exactly as in microservices** — PGR/
+  workflow publish to Kafka, an independent persister consumes and writes — which is the decoupling
+  the user wants to preserve (and the reason persister is NOT being absorbed as a module). The
+  modulith only changed *synchronous* in-process calls; the async pipeline is untouched.
