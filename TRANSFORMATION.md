@@ -661,12 +661,16 @@ Started Application in 9.495 seconds
   at the folder once; you don't list files. (A dedicated subfolder is used, not the resources root,
   because the loader parses *every* `.yml` it finds with no exclusions — the root's `application.yml`
   and unrelated sample configs would otherwise be (mis)parsed as persister configs.)
-- **Topic wiring:** workflow's config consumes `save-wf-transitions` / `save-wf-businessservice` /
-  `update-wf-businessservice` — exactly what the modulith publishes. *Caveat:* the only pgr config
-  in the repo (`pgr-v2-persist-batch.yml`) consumes the **`-batch`** topics, while the modulith's
-  normal create publishes `save-pgr-request`; the batch config matches the migration path, so a
-  non-batch pgr persister config (consuming `save-pgr-request`) may be needed for the live create
-  flow.
+- **Topic wiring (complete):** the `persister-configs/` folder now covers every topic the modulith
+  publishes —
+  - `pgr-services-persister.yml` → `save-pgr-request`, `update-pgr-request` (+ `statea-` tenant
+    variants) — the **live** pgr create/update path. *(Added after noticing the batch config alone
+    didn't cover live creates.)*
+  - `pgr-v2-persist-batch.yml` → `save-pgr-request-batch`, `save-wf-transitions-batch` — the
+    migration/batch path.
+  - `egov-workflow-v2-persister.yml` → `save-wf-transitions`, `save-wf-businessservice`,
+    `update-wf-businessservice` — workflow.
+  No duplicate `fromTopic` across files, so no double-processing.
 - **Why (architecture):** this keeps the async write path **exactly as in microservices** — PGR/
   workflow publish to Kafka, an independent persister consumes and writes — which is the decoupling
   the user wants to preserve (and the reason persister is NOT being absorbed as a module). The
