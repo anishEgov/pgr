@@ -40,9 +40,17 @@ public class IdGenRepository {
     private final ObjectMapper mapper;
 
     @Autowired
-    public IdGenRepository(IdGenerationService idGenerationService, ObjectMapper mapper) {
+    public IdGenRepository(IdGenerationService idGenerationService, ObjectMapper mapper,
+                           org.egov.id.config.PropertiesManager idgenInternalConfig) {
         this.idGenerationService = idGenerationService;
         this.mapper = mapper;
+        // ⚠️ DEMO ONLY (branch demo/modulith-verify-fails): this class is in the PGR module
+        // (org.egov.pgr.repository) and here calls a function on IDGEN's INTERNAL config
+        // (org.egov.id.config — NOT exposed; only id.service + id.model are published via
+        // @NamedInterface). Compiles fine (PropertiesManager is public), but cross-module access
+        // into a non-exposed package makes ApplicationModules.verify() FAIL the build:
+        //   "Module 'pgr' depends on non-exposed type org.egov.id.config.PropertiesManager ..."
+        idgenInternalConfig.getIdGenerationTable();
     }
 
 
