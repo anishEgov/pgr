@@ -1,99 +1,51 @@
 package org.egov.id.config;
 
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.env.Environment;
 
+import lombok.Getter;
 import lombok.NoArgsConstructor;
+import lombok.Setter;
 import lombok.ToString;
 
 /**
- * 
+ *
  * @author Yosadhara
  *
+ * <p>idgen module config (Option 2 — typed, prefix-bound). idgen's functional keys are re-homed
+ * under the single {@code egov.idgen.*} prefix and bound by field name via Spring's relaxed binding
+ * (e.g. {@code timeZone} ← {@code egov.idgen.time-zone}). Replaces the previous per-getter
+ * {@code Environment.getProperty(...)} lookups; getter names are unchanged so call sites
+ * ({@code IdGenerationService}, {@code GlobalExceptionHandler}) are untouched.
+ *
+ * <p>The former {@code getDbUrl/getDbUserName/getDbPassword/getServerContextpath} accessors were
+ * dropped: they read shared infra keys ({@code spring.datasource.*}, {@code server.context-path})
+ * that idgen does not own, and had no callers in the modulith.
  */
 @Configuration
+@ConfigurationProperties(prefix = "egov.idgen")
 @ToString
+@Getter
+@Setter
 @NoArgsConstructor
-@SuppressWarnings("unused")
 public class PropertiesManager {
 
-	@Autowired
-	Environment environment;
+	private String invalidInput;        // egov.idgen.invalid-input
 
-	private String invalidInput;
+	private String idGenerationTable;   // egov.idgen.id-generation-table
 
-	private String dbUrl;
+	private String idSequenceOverflow;  // egov.idgen.id-sequence-overflow
 
-	private String dbUserName;
+	private String idSequenceNotFound;  // egov.idgen.id-sequence-notfound
 
-	private String dbPassword;
+	private String invalidIdFormat;     // egov.idgen.invalid-id-format
 
-	private String idGenerationTable;
+	private String success;             // egov.idgen.success
 
-	private String idSequenceOverflow;
+	private String failed;              // egov.idgen.failed
 
-	private String idSequenceNotFound;
+	private String cityCodeNotFound;    // egov.idgen.city-code-notfound
 
-	private String invalidIdFormat;
+	private String timeZone;            // egov.idgen.time-zone
 
-	private String success;
-
-	private String failed;
-
-	private String serverContextpath;
-
-	private String timeZone;
-
-	public String getInvalidInput() {
-		return environment.getProperty("invalid.input");
-	}
-
-	public String getDbUrl() {
-		return environment.getProperty("spring.datasource.url");
-	}
-
-	public String getDbUserName() {
-		return environment.getProperty("spring.datasource.username");
-	}
-
-	public String getDbPassword() {
-		return environment.getProperty("spring.datasource.password");
-	}
-
-	public String getIdGenerationTable() {
-		return environment.getProperty("id.generation.table");
-	}
-
-	public String getIdSequenceOverflow() {
-		return environment.getProperty("id.sequence.overflow");
-	}
-
-	public String getIdSequenceNotFound() {
-		return environment.getProperty("id.sequence.notfound");
-	}
-
-	public String getInvalidIdFormat() {
-		return environment.getProperty("id.invalid.format");
-	}
-
-	public String getSuccess() {
-		return environment.getProperty("success");
-	}
-
-	public String getFailed() {
-		return environment.getProperty("failed");
-	}
-
-	public String getServerContextpath() {
-		return environment.getProperty("server.context-path");
-	}
-
-    public String getCityCodeNotFound() {
-        return environment.getProperty("city.code.notfound");
-    }
-
-    public String getTimeZone(){
-		return environment.getProperty("id.timezone");
-	}
 }

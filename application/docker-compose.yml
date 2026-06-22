@@ -44,7 +44,31 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
-# NOTE: persister is intentionally NOT a compose service. A single container would hardcode
-# one EGOV_PERSIST_YML_REPO_PATH (i.e. persist for ONE module). Persistence is cross-module
-# (pgr + workflow + ...), so we run the egov-persister service separately (from the
-# egov-persister/ source folder) pointed at MULTIPLE persist configs. See TRANSFORMATION.md [R.8].
+  # egov-persister: the SEPARATE async writer. Modules in the modulith produce to Kafka; this
+  # consumes and writes the shared DB. It stays its own service (not part of the modulith JVM),
+  # but it IS a compose service now: the whole persister-configs FOLDER is mounted and
+  # EGOV_PERSIST_YML_REPO_PATH points at it, so one container covers ALL modules' persist configs
+  # (pgr + workflow + ...) — the earlier "one module per container" concern doesn't apply.
+  # Talks to postgres:5432 / kafka:29092 over the internal compose network.
+  persister:
+    image: egovio/egov-persister:master-3b238aa
+    container_name: platform-persister
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    ports:
+      - "8090:8080"
+    volumes:
+      - ../egov-persister/src/main/resources/persister-configs:/configs:ro
+    environment:
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/platform
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      KAFKA_CONFIG_BOOTSTRAP_SERVER_CONFIG: kafka:29092
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_GROUP_ID: platform-persister
+      SPRING_KAFKA_CONSUMER_AUTO_OFFSET_RESET: earliest
+      EGOV_PERSIST_YML_REPO_PATH: /configs
